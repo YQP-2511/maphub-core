@@ -3,8 +3,9 @@
 提供Web页面模板生成功能
 """
 
+import json
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, List
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ class WebTemplates:
         total_viz = len(visualizations)
         wms_count = len([v for v in visualizations.values() if v['type'] == 'wms'])
         geojson_count = len([v for v in visualizations.values() if v['type'] == 'geojson'])
+        composite_count = len([v for v in visualizations.values() if v['type'] == 'composite'])
         
         # 生成可视化列表HTML
         viz_list_html = ""
@@ -300,6 +302,19 @@ class WebTemplates:
             font-family: monospace;
             color: #0c5460;
         }}
+        
+        .layer-list {{
+            background: #f8f9fa;
+            border-radius: 4px;
+            padding: 8px;
+            margin-top: 8px;
+            font-size: 0.85em;
+        }}
+        
+        .layer-item {{
+            padding: 2px 0;
+            color: #666;
+        }}
     </style>
 </head>
 <body>
@@ -323,8 +338,8 @@ class WebTemplates:
                 <div class="stat-label">GeoJSON地图</div>
             </div>
             <div class="stat-card">
-                <div class="stat-number">{server_info['port']}</div>
-                <div class="stat-label">服务端口</div>
+                <div class="stat-number">{composite_count}</div>
+                <div class="stat-label">复合地图</div>
             </div>
         </div>
         
@@ -353,6 +368,88 @@ class WebTemplates:
         document.addEventListener('DOMContentLoaded', function() {{
             console.log('OGC Web可视化服务器已加载');
         }});
+        
+        function copyUrl(url) {{
+            navigator.clipboard.writeText(url).then(function() {{
+                alert('链接已复制到剪贴板');
+            }});
+        }}
+    </script>
+</body>
+</html>"""
+        
+        return html_content
+    
+    def generate_composite_map(self, title: str, layers: List[Dict[str, Any]], 
+                              map_config: Dict[str, Any]) -> str:
+        """生成复合地图HTML
+        
+        Args:
+            title: 地图标题
+            layers: 图层列表
+            map_config: 地图配置
+            
+        Returns:
+            HTML内容
+        """
+        # 获取地图参数
+        width = map_config.get('width', 1200)
+        height = map_config.get('height', 800)
+        zoom = map_config.get('zoom', 10)
+        center = map_config.get('center', [39.9042, 116.4074])
+        
+        # 生成图层JavaScript代码
+        layers_js = self._generate_layers_javascript(layers)
+        
+        # 生成图层信息HTML
+        layers_info_html = self._generate_layers_info_html(layers)
+        
+        html_content = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{title}</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        {self._get_composite_map_styles(width, height)}
+    </style>
+</head>
+<body>
+    <div class="map-container">
+        <div class="map-header">
+            <div class="map-title">🗺️ {title}</div>
+            <div class="map-info">
+                <div class="info-item"><strong>图层数量:</strong> {len(layers)}</div>
+                <div class="info-item"><strong>图层类型:</strong> {', '.join(set(layer['type'].upper() for layer in layers))}</div>
+                <div class="info-item"><strong>坐标系:</strong> EPSG:4326</div>
+                <div class="info-item"><strong>服务类型:</strong> 复合可视化</div>
+            </div>
+        </div>
+        
+        {layers_info_html}
+        
+        <div id="map"></div>
+        
+        <div class="controls">
+            <div class="control-group">
+                <span class="control-label">🎯 中心点:</span>
+                <span id="center-coords">{center[0]:.4f}, {center[1]:.4f}</span>
+            </div>
+            <div class="control-group">
+                <span class="control-label">🔍 缩放级别:</span>
+                <span id="zoom-level">{zoom}</span>
+            </div>
+            <div class="control-group">
+                <span class="control-label">📍 鼠标位置:</span>
+                <span id="mouse-coords">移动鼠标查看坐标</span>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        {self._get_composite_map_javascript(center, zoom, layers_js)}
     </script>
 </body>
 </html>"""
@@ -375,8 +472,18 @@ class WebTemplates:
         created_time = datetime.fromtimestamp(viz_info['created_at']).strftime('%Y-%m-%d %H:%M:%S')
         
         # 根据类型设置不同的样式
-        type_color = "#3498db" if viz_type == "WMS" else "#27ae60"
-        type_icon = "🗺️" if viz_type == "WMS" else "📍"
+        if viz_type == "WMS":
+            type_color = "#3498db"
+            type_icon = "🗺️"
+        elif viz_type == "GEOJSON":
+            type_color = "#27ae60"
+            type_icon = "📍"
+        elif viz_type == "COMPOSITE":
+            type_color = "#e74c3c"
+            type_icon = "🌐"
+        else:
+            type_color = "#95a5a6"
+            type_icon = "📊"
         
         # 获取统计信息
         stats_html = ""
@@ -390,6 +497,30 @@ class WebTemplates:
             <div class="info-item">
                 <div class="info-label">几何类型</div>
                 <div class="info-value">{', '.join(stats.get('geometry_types', []))}</div>
+            </div>
+            """
+        elif viz_type == "COMPOSITE" and 'layers' in viz_info:
+            layers = viz_info['layers']
+            layer_types = [layer['type'].upper() for layer in layers]
+            stats_html = f"""
+            <div class="info-item">
+                <div class="info-label">图层数量</div>
+                <div class="info-value">{len(layers)}</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">图层类型</div>
+                <div class="info-value">{', '.join(set(layer_types))}</div>
+            </div>
+            """
+            # 添加图层列表
+            layer_list_html = '<div class="layer-list">'
+            for layer in layers:
+                layer_list_html += f'<div class="layer-item">• {layer.get("name", "未命名图层")} ({layer["type"].upper()})</div>'
+            layer_list_html += '</div>'
+            stats_html += f"""
+            <div class="info-item" style="grid-column: 1 / -1;">
+                <div class="info-label">包含图层</div>
+                {layer_list_html}
             </div>
             """
         else:
@@ -433,12 +564,241 @@ class WebTemplates:
                 </div>
             </div>
         </div>
+        """
+    
+    def _generate_layers_javascript(self, layers: List[Dict[str, Any]]) -> str:
+        """生成图层JavaScript代码"""
+        layers_js = []
         
-        <script>
-        function copyUrl(url) {{
-            navigator.clipboard.writeText(url).then(function() {{
-                alert('链接已复制到剪贴板');
-            }});
+        for i, layer in enumerate(layers):
+            if layer["type"] == "wms":
+                layer_js = f"""
+                var wmsLayer{i} = L.tileLayer.wms('{layer["service_url"]}', {{
+                    layers: '{layer["layer_name"]}',
+                    format: 'image/png',
+                    transparent: true,
+                    crs: L.CRS.EPSG4326,
+                    opacity: {layer.get("opacity", 0.8)}
+                }});
+                
+                layerControl.addOverlay(wmsLayer{i}, '{layer["name"]}');
+                if ({str(layer.get("visible", True)).lower()}) {{
+                    wmsLayer{i}.addTo(map);
+                }}
+                """
+                
+            elif layer["type"] == "geojson":
+                geojson_str = json.dumps(layer["geojson_data"])
+                style_str = json.dumps(layer["style"])
+                
+                layer_js = f"""
+                var geojsonData{i} = {geojson_str};
+                var geojsonLayer{i} = L.geoJSON(geojsonData{i}, {{
+                    style: {style_str},
+                    pointToLayer: function(feature, latlng) {{
+                        return L.circleMarker(latlng, {style_str});
+                    }},
+                    onEachFeature: function(feature, layer) {{
+                        if (feature.properties) {{
+                            var popupContent = '<div class="popup-title">要素属性</div>';
+                            popupContent += '<div class="popup-properties">';
+                            for (var key in feature.properties) {{
+                                var value = feature.properties[key];
+                                if (value !== null && value !== undefined) {{
+                                    popupContent += '<div class="popup-property">';
+                                    popupContent += '<span class="property-key">' + key + ':</span>';
+                                    popupContent += '<span class="property-value">' + value + '</span>';
+                                    popupContent += '</div>';
+                                }}
+                            }}
+                            popupContent += '</div>';
+                            layer.bindPopup(popupContent);
+                            
+                            // 鼠标悬停高亮
+                            layer.on('mouseover', function(e) {{
+                                var layer = e.target;
+                                if (layer.setStyle) {{
+                                    layer.setStyle({{
+                                        weight: 5,
+                                        color: '#ff7800',
+                                        fillOpacity: 0.5
+                                    }});
+                                }}
+                            }});
+                            
+                            layer.on('mouseout', function(e) {{
+                                geojsonLayer{i}.resetStyle(e.target);
+                            }});
+                        }}
+                    }}
+                }});
+                
+                layerControl.addOverlay(geojsonLayer{i}, '{layer["name"]}');
+                if ({str(layer.get("visible", True)).lower()}) {{
+                    geojsonLayer{i}.addTo(map);
+                }}
+                """
+            
+            layers_js.append(layer_js)
+        
+        return '\n'.join(layers_js)
+    
+    def _generate_layers_info_html(self, layers: List[Dict[str, Any]]) -> str:
+        """生成图层信息HTML"""
+        layers_info = '<div class="layer-info"><div class="layer-count">包含图层:</div>'
+        for layer in layers:
+            layers_info += f'<div>• {layer["name"]} ({layer["type"].upper()})</div>'
+        layers_info += '</div>'
+        return layers_info
+    
+    def _get_composite_map_styles(self, width: int, height: int) -> str:
+        """获取复合地图样式"""
+        return f"""
+        body {{ 
+            margin: 0; 
+            padding: 20px; 
+            font-family: Arial, sans-serif; 
+            background-color: #f5f5f5; 
         }}
-        </script>
+        .map-container {{ 
+            background: white; 
+            border-radius: 8px; 
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1); 
+            padding: 20px; 
+        }}
+        .map-header {{
+            margin-bottom: 15px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #eee;
+        }}
+        .map-title {{
+            font-size: 24px;
+            font-weight: bold;
+            color: #333;
+            margin: 0 0 10px 0;
+        }}
+        .map-info {{
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+            color: #666;
+            font-size: 14px;
+        }}
+        .info-item {{
+            background: #f8f9fa;
+            padding: 5px 10px;
+            border-radius: 4px;
+        }}
+        .layer-info {{
+            background: #e8f4fd;
+            border: 1px solid #bee5eb;
+            border-radius: 4px;
+            padding: 10px;
+            margin-bottom: 10px;
+        }}
+        .layer-count {{
+            font-weight: bold;
+            color: #0c5460;
+            margin-bottom: 5px;
+        }}
+        #map {{ 
+            width: {width}px; 
+            height: {height}px; 
+            border-radius: 4px; 
+            border: 1px solid #ddd; 
+        }}
+        .controls {{
+            margin-top: 15px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 4px;
+        }}
+        .control-group {{
+            margin-bottom: 10px;
+        }}
+        .control-label {{
+            font-weight: bold;
+            color: #555;
+            margin-right: 10px;
+        }}
+        .leaflet-popup-content {{
+            max-width: 300px;
+        }}
+        .popup-title {{
+            font-weight: bold;
+            margin-bottom: 8px;
+            color: #333;
+        }}
+        .popup-properties {{
+            font-size: 12px;
+        }}
+        .popup-property {{
+            margin: 3px 0;
+            padding: 2px 0;
+            border-bottom: 1px solid #eee;
+        }}
+        .property-key {{
+            font-weight: bold;
+            color: #555;
+        }}
+        .property-value {{
+            color: #777;
+            margin-left: 5px;
+        }}
+        """
+    
+    def _get_composite_map_javascript(self, center: List[float], zoom: int, layers_js: str) -> str:
+        """获取复合地图JavaScript"""
+        return f"""
+        // 初始化地图
+        var map = L.map('map').setView([{center[0]}, {center[1]}], {zoom});
+        
+        // 添加底图
+        var osm = L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+            attribution: '© OpenStreetMap contributors'
+        }});
+        
+        var satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{{z}}/{{y}}/{{x}}', {{
+            attribution: '© Esri'
+        }});
+        
+        // 默认添加OSM底图
+        osm.addTo(map);
+        
+        // 创建图层控制器
+        var baseMaps = {{
+            "OpenStreetMap": osm,
+            "卫星影像": satellite
+        }};
+        
+        var layerControl = L.control.layers(baseMaps, {{}}).addTo(map);
+        
+        // 添加图层
+        {layers_js}
+        
+        // 添加比例尺
+        L.control.scale().addTo(map);
+        
+        // 鼠标坐标显示
+        map.on('mousemove', function(e) {{
+            document.getElementById('mouse-coords').textContent = 
+                e.latlng.lat.toFixed(6) + ', ' + e.latlng.lng.toFixed(6);
+        }});
+        
+        // 地图移动和缩放事件
+        map.on('moveend zoomend', function() {{
+            var center = map.getCenter();
+            var zoom = map.getZoom();
+            document.getElementById('center-coords').textContent = 
+                center.lat.toFixed(4) + ', ' + center.lng.toFixed(4);
+            document.getElementById('zoom-level').textContent = zoom;
+        }});
+        
+        // 点击地图显示坐标
+        map.on('click', function(e) {{
+            L.popup()
+                .setLatLng(e.latlng)
+                .setContent('坐标: ' + e.latlng.lat.toFixed(6) + ', ' + e.latlng.lng.toFixed(6))
+                .openOn(map);
+        }});
         """

@@ -21,7 +21,9 @@ from .services.web_server.server import get_web_server, stop_web_server
 from .tools.management_tools import management_server
 from .tools.wms_tools import wms_server  
 from .tools.wfs_tools import wfs_server
+from .tools.visualization_tools import visualization_server
 from .resources.layer_resources import layer_resource_server
+from .prompts.workflow_prompts import workflow_prompts_server
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -136,6 +138,8 @@ async def lifespan(app):
                 await app.import_server(management_server, prefix="mgmt")        # 管理工具
                 await app.import_server(wms_server, prefix="wms")               # WMS工具
                 await app.import_server(wfs_server, prefix="wfs")               # WFS工具
+                await app.import_server(visualization_server, prefix="viz")     # 通用可视化工具
+                await app.import_server(workflow_prompts_server, prefix="workflow")  # 工作流提示词
                 await app.import_server(layer_resource_server)                  # 图层资源（无前缀）
                 
                 _servers_imported = True
@@ -145,6 +149,8 @@ async def lifespan(app):
                 logger.info("- 管理工具 (mgmt_*)")
                 logger.info("- WMS工具 (wms_*)")
                 logger.info("- WFS工具 (wfs_*)")
+                logger.info("- 通用可视化工具 (viz_*)")
+                logger.info("- 工作流提示词 (workflow_*)")
                 logger.info("- 图层资源")
                 
             except Exception as e:

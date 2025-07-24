@@ -40,7 +40,12 @@ wheels/
 # 操作系统文件
 .DS_Store
 Thumbs.db
+
+# 数据库文件和数据目录
 data/
+*.db
+*.sqlite
+*.sqlite3
 
 # 前端相关
 node_modules/

@@ -32,7 +32,14 @@ async def layer_resources_list(ctx: Context = None) -> Dict[str, Any]:
         repository = await get_layer_repository()
         
         # 获取所有图层资源
-        query = LayerResourceQuery(limit=1000, offset=0)
+        # 获取所有图层资源 - 明确指定所有参数
+        query = LayerResourceQuery(
+            service_type=None,
+            service_name=None,
+            layer_name=None,
+            limit=1000,
+            offset=0
+        )
         layers = await repository.list_resources(query)
         total_count = await repository.count(query)
         

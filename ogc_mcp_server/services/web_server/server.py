@@ -9,13 +9,13 @@ import threading
 import json
 import shutil
 import atexit
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import tempfile
 import os
 
-from .handlers import MapHandler, GeoJSONHandler, LayerHandler
+from .handlers import MapHandler, GeoJSONHandler, LayerHandler, CompositeHandler
 from .templates import WebTemplates
 
 logger = logging.getLogger(__name__)
@@ -27,6 +27,7 @@ class WebVisualizationServer:
     提供OGC MCP工具结果的Web可视化服务，支持：
     - WMS地图可视化
     - WFS GeoJSON可视化
+    - 复合图层可视化
     - 图层管理界面
     - 结果展示和交互
     """
@@ -51,6 +52,7 @@ class WebVisualizationServer:
         self.geojson_handler = GeoJSONHandler()
         self.layer_handler = LayerHandler()
         self.templates = WebTemplates()
+        self.composite_handler = CompositeHandler(self.templates)
         
         # 存储可视化结果
         self.visualizations = {}
@@ -252,6 +254,75 @@ class WebVisualizationServer:
         
         return self.visualizations[viz_id]["url"]
     
+    async def add_composite_visualization(self, title: str, layers: List[Dict[str, Any]], 
+                                        map_config: Dict[str, Any]) -> str:
+        """添加复合图层可视化
+        
+        Args:
+            title: 地图标题
+            layers: 图层配置列表，每个图层包含type、layer_info等信息
+            map_config: 地图配置
+            
+        Returns:
+            可视化页面URL
+        """
+        # 生成可视化ID
+        viz_id = f"composite_{title.replace(' ', '_').replace(':', '_').replace('/', '_')}"
+        
+        try:
+            # 处理图层数据
+            processed_layers = []
+            for layer_config in layers:
+                processed_layer = self.composite_handler.process_layer_data(layer_config)
+                processed_layers.append(processed_layer)
+            
+            # 计算地图边界（如果没有提供中心点）
+            if 'center' not in map_config:
+                bounds = self.composite_handler.calculate_map_bounds(processed_layers)
+                if bounds:
+                    center_lat = (bounds['north'] + bounds['south']) / 2
+                    center_lng = (bounds['east'] + bounds['west']) / 2
+                    map_config['center'] = [center_lat, center_lng]
+                else:
+                    map_config['center'] = [39.9042, 116.4074]  # 默认北京
+            
+            # 生成复合地图HTML
+            html_content = await self.composite_handler.generate_composite_map(
+                title, processed_layers, map_config
+            )
+            
+            # 保存到Web目录
+            html_path = os.path.join(self.web_dir, f"{viz_id}.html")
+            with open(html_path, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            
+            # 存储可视化信息
+            self.visualizations[viz_id] = {
+                "type": "composite",
+                "layer_name": title,
+                "layer_info": {
+                    "layer_title": title,
+                    "service_name": "复合可视化",
+                    "crs": "EPSG:4326"
+                },
+                "layers": processed_layers,
+                "map_config": map_config,
+                "html_file": html_path,
+                "url": f"{self._get_base_url()}/{viz_id}.html",
+                "created_at": asyncio.get_event_loop().time()
+            }
+            
+            # 更新首页
+            await self._update_index_page()
+            
+            logger.info(f"复合可视化创建成功: {title}, 包含 {len(processed_layers)} 个图层")
+            
+            return self.visualizations[viz_id]["url"]
+            
+        except Exception as e:
+            logger.error(f"创建复合可视化失败: {e}")
+            raise
+    
     def get_visualization_url(self, viz_id: str) -> Optional[str]:
         """获取可视化URL
         
@@ -277,6 +348,49 @@ class WebVisualizationServer:
             "base_url": self._get_base_url()
         }
     
+    def get_visualization_by_id(self, viz_id: str) -> Optional[Dict[str, Any]]:
+        """根据ID获取可视化信息
+        
+        Args:
+            viz_id: 可视化ID
+            
+        Returns:
+            可视化信息，如果不存在则返回None
+        """
+        return self.visualizations.get(viz_id)
+    
+    def remove_visualization(self, viz_id: str) -> bool:
+        """删除可视化
+        
+        Args:
+            viz_id: 可视化ID
+            
+        Returns:
+            是否删除成功
+        """
+        if viz_id not in self.visualizations:
+            return False
+        
+        try:
+            # 删除HTML文件
+            viz_info = self.visualizations[viz_id]
+            html_file = viz_info.get("html_file")
+            if html_file and os.path.exists(html_file):
+                os.remove(html_file)
+            
+            # 从内存中删除
+            del self.visualizations[viz_id]
+            
+            # 更新首页
+            asyncio.create_task(self._update_index_page())
+            
+            logger.info(f"可视化已删除: {viz_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"删除可视化失败: {e}")
+            return False
+    
     def _start_http_server(self):
         """启动HTTP服务器"""
         class RequestHandler(BaseHTTPRequestHandler):
@@ -288,6 +402,9 @@ class WebVisualizationServer:
                 self._handle_request()
             
             def do_POST(self):
+                self._handle_request()
+            
+            def do_DELETE(self):
                 self._handle_request()
             
             def _handle_request(self):
@@ -308,6 +425,10 @@ class WebVisualizationServer:
                     elif path == 'api/visualizations':
                         # API接口
                         self._serve_api()
+                    elif path.startswith('api/visualizations/'):
+                        # 单个可视化API
+                        viz_id = path.split('/')[-1]
+                        self._serve_visualization_api(viz_id)
                     else:
                         # 静态资源
                         self._serve_static_file(path)
@@ -351,6 +472,33 @@ class WebVisualizationServer:
                 except Exception as e:
                     self._send_error(500, str(e))
             
+            def _serve_visualization_api(self, viz_id: str):
+                """提供单个可视化API"""
+                try:
+                    if self.command == 'GET':
+                        # 获取可视化信息
+                        viz_info = self.web_server.get_visualization_by_id(viz_id)
+                        if viz_info:
+                            content = json.dumps(viz_info, ensure_ascii=False, indent=2)
+                            self._send_response(200, content, 'application/json')
+                        else:
+                            self._send_error(404, f"可视化未找到: {viz_id}")
+                    
+                    elif self.command == 'DELETE':
+                        # 删除可视化
+                        success = self.web_server.remove_visualization(viz_id)
+                        if success:
+                            content = json.dumps({"message": "删除成功"}, ensure_ascii=False)
+                            self._send_response(200, content, 'application/json')
+                        else:
+                            self._send_error(404, f"可视化未找到: {viz_id}")
+                    
+                    else:
+                        self._send_error(405, "方法不允许")
+                        
+                except Exception as e:
+                    self._send_error(500, str(e))
+            
             def _serve_static_file(self, filename):
                 """提供静态文件"""
                 self._send_error(404, f"静态文件未找到: {filename}")
@@ -361,6 +509,9 @@ class WebVisualizationServer:
                     self.send_response(status_code)
                     self.send_header('Content-Type', f'{content_type}; charset=utf-8')
                     self.send_header('Content-Length', str(len(content.encode('utf-8'))))
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.send_header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS')
+                    self.send_header('Access-Control-Allow-Headers', 'Content-Type')
                     self.end_headers()
                     self.wfile.write(content.encode('utf-8'))
                 except Exception as e:

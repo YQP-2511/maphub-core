@@ -509,6 +509,138 @@ class GeoJSONHandler:
             return default_style
 
 
+class CompositeHandler:
+    """复合可视化处理器"""
+    
+    def __init__(self, templates):
+        """初始化复合处理器
+        
+        Args:
+            templates: WebTemplates实例
+        """
+        self.templates = templates
+        self.map_handler = MapHandler()
+        self.geojson_handler = GeoJSONHandler()
+    
+    async def generate_composite_map(self, title: str, layers: List[Dict[str, Any]], 
+                                   map_config: Dict[str, Any]) -> str:
+        """生成复合地图HTML
+        
+        Args:
+            title: 地图标题
+            layers: 图层列表
+            map_config: 地图配置
+            
+        Returns:
+            HTML内容
+        """
+        return self.templates.generate_composite_map(title, layers, map_config)
+    
+    def process_layer_data(self, layer_config: Dict[str, Any]) -> Dict[str, Any]:
+        """处理图层数据
+        
+        Args:
+            layer_config: 图层配置
+            
+        Returns:
+            处理后的图层数据
+        """
+        layer_type = layer_config.get("type", "").lower()
+        
+        if layer_type == "wms":
+            return self._process_wms_layer(layer_config)
+        elif layer_type == "geojson":
+            return self._process_geojson_layer(layer_config)
+        else:
+            raise ValueError(f"不支持的图层类型: {layer_type}")
+    
+    def _process_wms_layer(self, layer_config: Dict[str, Any]) -> Dict[str, Any]:
+        """处理WMS图层配置"""
+        layer_info = layer_config.get("layer_info", {})
+        map_config = layer_config.get("map_config", {})
+        
+        return {
+            "type": "wms",
+            "name": layer_info.get("layer_name", "WMS图层"),
+            "title": layer_info.get("layer_title", ""),
+            "service_url": layer_info.get("service_url", ""),
+            "layer_name": layer_info.get("layer_name", ""),
+            "crs": layer_info.get("crs", "EPSG:4326"),
+            "bbox": map_config.get("bbox"),
+            "opacity": layer_config.get("opacity", 0.8),
+            "visible": layer_config.get("visible", True),
+            "layer_info": layer_info
+        }
+    
+    def _process_geojson_layer(self, layer_config: Dict[str, Any]) -> Dict[str, Any]:
+        """处理GeoJSON图层配置"""
+        layer_info = layer_config.get("layer_info", {})
+        geojson_data = layer_config.get("geojson_data", {})
+        style = layer_config.get("style", {})
+        
+        # 使用GeoJSONHandler的默认样式
+        default_style = self.geojson_handler._get_default_style()
+        default_style.update(style)
+        
+        return {
+            "type": "geojson",
+            "name": layer_info.get("layer_name", "GeoJSON图层"),
+            "title": layer_info.get("layer_title", ""),
+            "geojson_data": geojson_data,
+            "style": default_style,
+            "opacity": layer_config.get("opacity", 0.8),
+            "visible": layer_config.get("visible", True),
+            "layer_info": layer_info
+        }
+    
+    def calculate_map_bounds(self, layers: List[Dict[str, Any]]) -> Optional[Dict[str, float]]:
+        """计算地图边界"""
+        bounds = {"north": -90, "south": 90, "east": -180, "west": 180}
+        has_bounds = False
+        
+        for layer in layers:
+            if layer["type"] == "wms" and layer.get("bbox"):
+                bbox = layer["bbox"]
+                if len(bbox) == 4:
+                    bounds["west"] = min(bounds["west"], bbox[0])
+                    bounds["south"] = min(bounds["south"], bbox[1])
+                    bounds["east"] = max(bounds["east"], bbox[2])
+                    bounds["north"] = max(bounds["north"], bbox[3])
+                    has_bounds = True
+                    
+            elif layer["type"] == "geojson" and layer.get("geojson_data"):
+                # 从GeoJSON数据计算边界
+                geojson = layer["geojson_data"]
+                if geojson.get("features"):
+                    for feature in geojson["features"]:
+                        geometry = feature.get("geometry", {})
+                        if geometry.get("coordinates"):
+                            coords = self._extract_coordinates(geometry["coordinates"])
+                            for coord in coords:
+                                if len(coord) >= 2:
+                                    lon, lat = coord[0], coord[1]
+                                    bounds["west"] = min(bounds["west"], lon)
+                                    bounds["east"] = max(bounds["east"], lon)
+                                    bounds["south"] = min(bounds["south"], lat)
+                                    bounds["north"] = max(bounds["north"], lat)
+                                    has_bounds = True
+        
+        return bounds if has_bounds else None
+    
+    def _extract_coordinates(self, coords) -> List[List[float]]:
+        """递归提取坐标"""
+        result = []
+        if isinstance(coords, list):
+            if len(coords) > 0 and isinstance(coords[0], (int, float)):
+                # 这是一个坐标点
+                result.append(coords)
+            else:
+                # 这是坐标数组
+                for item in coords:
+                    result.extend(self._extract_coordinates(item))
+        return result
+
+
 class LayerHandler:
     """图层管理处理器"""
     
