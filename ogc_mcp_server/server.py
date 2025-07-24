@@ -90,7 +90,15 @@ async def graceful_shutdown():
     except Exception as e:
         logger.error(f"优雅关闭过程中出现错误: {e}")
     finally:
-        # 确保退出
+        # 重置全局状态
+        global _shutdown_in_progress, _servers_imported
+        _shutdown_in_progress = False
+        _servers_imported = False
+        
+        logger.info("服务器已关闭")
+        
+        # 不再使用 sys.exit(0)，让程序自然退出
+        # 这样可以避免 SystemExit 异常和相关的错误信息
         logger.info("退出程序")
         sys.exit(0)
 

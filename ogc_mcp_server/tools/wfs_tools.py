@@ -186,11 +186,13 @@ async def create_geojson_visualization(
     initial_zoom: Annotated[int, Field(description="初始缩放级别", ge=1, le=18)] = 10,
     style_config: Annotated[Optional[str], Field(description="样式配置JSON字符串")] = None,
     bbox: Annotated[Optional[str], Field(description="边界框过滤，格式：min_x,min_y,max_x,max_y")] = None,
+    cql_filter: Annotated[Optional[str], Field(description="CQL过滤条件")] = None,
     ctx: Context = None
 ) -> Dict[str, Any]:
     """创建WFS GeoJSON Web可视化
     
     在统一Web服务器中创建WFS图层的GeoJSON交互式地图可视化。
+    支持CQL过滤条件和边界框过滤，提供完整的交互式地图功能。
     """
     if ctx:
         await ctx.info(f"正在创建WFS GeoJSON可视化: {layer_name}")
@@ -216,8 +218,11 @@ async def create_geojson_visualization(
             "maxFeatures": max_features
         }
         
+        # 添加过滤条件
         if bbox:
             params["bbox"] = bbox
+        if cql_filter:
+            params["cql_filter"] = cql_filter
         
         # 获取GeoJSON数据
         geojson_data = await _fetch_geojson_data(layer.service_url, params, ctx)
@@ -261,6 +266,11 @@ async def create_geojson_visualization(
             "layer_info": layer_info,
             "geojson_statistics": stats,
             "map_config": map_config,
+            "filter_info": {
+                "bbox": bbox,
+                "cql_filter": cql_filter,
+                "max_features": max_features
+            },
             "instructions": {
                 "access": f"在浏览器中访问: {visualization_url}",
                 "web_server": f"Web服务器首页: {web_server._get_base_url()}",
@@ -269,13 +279,20 @@ async def create_geojson_visualization(
                     "要素属性弹窗查看",
                     "交互式地图操作",
                     "样式自定义和图层控制",
-                    "坐标显示和测量工具"
+                    "坐标显示和测量工具",
+                    "支持CQL过滤和空间过滤"
                 ]
             }
         }
         
         if ctx:
-            await ctx.info(f"GeoJSON可视化创建成功，要素数量: {stats['feature_count']}，访问地址: {visualization_url}")
+            filter_info = []
+            if cql_filter:
+                filter_info.append(f"CQL过滤: {cql_filter}")
+            if bbox:
+                filter_info.append(f"边界框: {bbox}")
+            filter_text = f" (过滤条件: {', '.join(filter_info)})" if filter_info else ""
+            await ctx.info(f"GeoJSON可视化创建成功，要素数量: {stats['feature_count']}{filter_text}，访问地址: {visualization_url}")
         
         logger.info(f"GeoJSON可视化创建成功: {layer_name}，要素数量: {stats['feature_count']}")
         return result

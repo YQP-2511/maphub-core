@@ -40,6 +40,7 @@ wheels/
 # 操作系统文件
 .DS_Store
 Thumbs.db
+data/
 
 # 前端相关
 node_modules/

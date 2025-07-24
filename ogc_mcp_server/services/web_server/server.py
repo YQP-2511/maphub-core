@@ -101,34 +101,50 @@ class WebVisualizationServer:
             # 设置关闭事件
             self._shutdown_event.set()
             
-            # 关闭HTTP服务器
+            # 强制关闭HTTP服务器
             if self.server:
-                logger.info("正在关闭HTTP服务器...")
-                self.server.shutdown()
-                self.server.server_close()
-                logger.info("HTTP服务器已关闭")
+                logger.info("正在强制关闭HTTP服务器...")
+                
+                # 在单独线程中执行关闭操作，避免阻塞
+                def force_shutdown():
+                    try:
+                        self.server.shutdown()
+                        self.server.server_close()
+                        logger.info("HTTP服务器已强制关闭")
+                    except Exception as e:
+                        logger.warning(f"强制关闭HTTP服务器时出现异常: {e}")
+                
+                # 启动关闭线程
+                shutdown_thread = threading.Thread(target=force_shutdown, daemon=True)
+                shutdown_thread.start()
+                
+                # 等待关闭完成，但不超过2秒
+                shutdown_thread.join(timeout=2)
+                if shutdown_thread.is_alive():
+                    logger.warning("HTTP服务器关闭超时，继续执行")
             
-            # 等待服务器线程结束
+            # 强制结束服务器线程
             if self.server_thread and self.server_thread.is_alive():
-                logger.info("等待服务器线程结束...")
-                self.server_thread.join(timeout=10)  # 增加超时时间
+                logger.info("正在强制结束服务器线程...")
+                # 减少等待时间到3秒
+                self.server_thread.join(timeout=3)
                 if self.server_thread.is_alive():
-                    logger.warning("服务器线程未能在超时时间内结束")
+                    logger.warning("服务器线程强制结束超时")
                 else:
                     logger.info("服务器线程已结束")
             
             self.is_running = False
             
-            # 清理资源
-            asyncio.create_task(self._cleanup_resources())
+            # 同步清理资源，避免异步任务
+            self._cleanup_resources_sync()
             
             logger.info("Web可视化服务器已停止")
             
         except Exception as e:
             logger.error(f"停止Web服务器失败: {e}")
     
-    async def _cleanup_resources(self):
-        """清理资源"""
+    def _cleanup_resources_sync(self):
+        """同步清理资源"""
         try:
             # 清理临时Web目录
             if self.web_dir and os.path.exists(self.web_dir):
@@ -141,6 +157,10 @@ class WebVisualizationServer:
             
         except Exception as e:
             logger.error(f"清理资源失败: {e}")
+    
+    async def _cleanup_resources(self):
+        """异步清理资源（保留用于正常关闭）"""
+        self._cleanup_resources_sync()
     
     def _cleanup_on_exit(self):
         """程序退出时的清理函数"""

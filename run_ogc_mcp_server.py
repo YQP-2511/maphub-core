@@ -8,6 +8,9 @@ import sys
 import signal
 import asyncio
 import uvicorn
+import threading
+import time
+import os
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from ogc_mcp_server.server import mcp
@@ -25,19 +28,49 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # 全局变量用于优雅关闭
-shutdown_event = asyncio.Event()
+shutdown_in_progress = False
+
+def force_exit():
+    """强制退出函数"""
+    time.sleep(2.0)  # 等待2秒让优雅关闭完成
+    logger.warning("强制退出程序")
+    
+    # 尝试清理所有活跃线程
+    try:
+        for thread in threading.enumerate():
+            if thread != threading.current_thread() and thread.is_alive():
+                logger.debug(f"发现活跃线程: {thread.name}")
+    except Exception as e:
+        logger.debug(f"清理线程时出错: {e}")
+    
+    # 强制退出
+    os._exit(0)
 
 def signal_handler(signum, frame):
     """信号处理器"""
-    logger.info(f"收到信号 {signum}，正在关闭服务器...")
-    shutdown_event.set()
+    global shutdown_in_progress
+    
+    if shutdown_in_progress:
+        logger.warning("重复接收到退出信号，强制退出...")
+        os._exit(1)
+        return
+    
+    shutdown_in_progress = True
+    signal_name = "SIGINT" if signum == signal.SIGINT else f"信号{signum}"
+    logger.info(f"收到{signal_name}，正在优雅关闭服务器...")
+    
+    # 启动强制退出定时器
+    force_exit_timer = threading.Timer(2.0, force_exit)
+    force_exit_timer.daemon = True
+    force_exit_timer.start()
 
 if __name__ == "__main__":
     logger.info("正在启动OGC MCP服务器...")
     
     # 注册信号处理器
     signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    if hasattr(signal, 'SIGTERM'):
+        signal.signal(signal.SIGTERM, signal_handler)
     
     try:
         # 配置CORS中间件
