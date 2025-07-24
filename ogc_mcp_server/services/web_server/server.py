@@ -7,6 +7,8 @@ import asyncio
 import logging
 import threading
 import json
+import shutil
+import atexit
 from typing import Dict, Any, Optional
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -42,6 +44,7 @@ class WebVisualizationServer:
         self.server_thread = None
         self.is_running = False
         self.web_dir = None
+        self._shutdown_event = threading.Event()
         
         # 初始化处理器
         self.map_handler = MapHandler()
@@ -51,6 +54,9 @@ class WebVisualizationServer:
         
         # 存储可视化结果
         self.visualizations = {}
+        
+        # 注册退出时的清理函数
+        atexit.register(self._cleanup_on_exit)
         
     async def start(self) -> Dict[str, Any]:
         """启动Web服务器
@@ -64,6 +70,7 @@ class WebVisualizationServer:
         try:
             # 创建临时Web目录
             self.web_dir = tempfile.mkdtemp(prefix="ogc_web_server_")
+            logger.info(f"创建Web目录: {self.web_dir}")
             
             # 创建静态资源
             await self._setup_static_resources()
@@ -80,6 +87,7 @@ class WebVisualizationServer:
             
         except Exception as e:
             logger.error(f"启动Web服务器失败: {e}")
+            await self._cleanup_resources()
             raise
     
     def stop(self):
@@ -87,19 +95,58 @@ class WebVisualizationServer:
         if not self.is_running:
             return
         
+        logger.info("正在停止Web可视化服务器...")
+        
         try:
+            # 设置关闭事件
+            self._shutdown_event.set()
+            
+            # 关闭HTTP服务器
             if self.server:
+                logger.info("正在关闭HTTP服务器...")
                 self.server.shutdown()
                 self.server.server_close()
+                logger.info("HTTP服务器已关闭")
             
+            # 等待服务器线程结束
             if self.server_thread and self.server_thread.is_alive():
-                self.server_thread.join(timeout=5)
+                logger.info("等待服务器线程结束...")
+                self.server_thread.join(timeout=10)  # 增加超时时间
+                if self.server_thread.is_alive():
+                    logger.warning("服务器线程未能在超时时间内结束")
+                else:
+                    logger.info("服务器线程已结束")
             
             self.is_running = False
+            
+            # 清理资源
+            asyncio.create_task(self._cleanup_resources())
+            
             logger.info("Web可视化服务器已停止")
             
         except Exception as e:
             logger.error(f"停止Web服务器失败: {e}")
+    
+    async def _cleanup_resources(self):
+        """清理资源"""
+        try:
+            # 清理临时Web目录
+            if self.web_dir and os.path.exists(self.web_dir):
+                logger.info(f"清理Web目录: {self.web_dir}")
+                shutil.rmtree(self.web_dir, ignore_errors=True)
+                self.web_dir = None
+            
+            # 清理可视化数据
+            self.visualizations.clear()
+            
+        except Exception as e:
+            logger.error(f"清理资源失败: {e}")
+    
+    def _cleanup_on_exit(self):
+        """程序退出时的清理函数"""
+        if self.is_running:
+            logger.info("程序退出，清理Web服务器资源...")
+            self.stop()
     
     async def add_wms_visualization(self, layer_name: str, layer_info: Dict[str, Any], 
                                    map_config: Dict[str, Any]) -> str:
@@ -224,6 +271,10 @@ class WebVisualizationServer:
                 self._handle_request()
             
             def _handle_request(self):
+                # 检查是否需要关闭
+                if self.web_server._shutdown_event.is_set():
+                    return
+                
                 try:
                     parsed_url = urlparse(self.path)
                     path = parsed_url.path.lstrip('/')
@@ -286,33 +337,53 @@ class WebVisualizationServer:
             
             def _send_response(self, status_code, content, content_type):
                 """发送响应"""
-                self.send_response(status_code)
-                self.send_header('Content-Type', f'{content_type}; charset=utf-8')
-                self.send_header('Content-Length', str(len(content.encode('utf-8'))))
-                self.end_headers()
-                self.wfile.write(content.encode('utf-8'))
+                try:
+                    self.send_response(status_code)
+                    self.send_header('Content-Type', f'{content_type}; charset=utf-8')
+                    self.send_header('Content-Length', str(len(content.encode('utf-8'))))
+                    self.end_headers()
+                    self.wfile.write(content.encode('utf-8'))
+                except Exception as e:
+                    logger.error(f"发送响应失败: {e}")
             
             def _send_error(self, status_code, message):
                 """发送错误响应"""
-                content = f"<html><body><h1>错误 {status_code}</h1><p>{message}</p></body></html>"
-                self._send_response(status_code, content, 'text/html')
+                try:
+                    content = f"<html><body><h1>错误 {status_code}</h1><p>{message}</p></body></html>"
+                    self._send_response(status_code, content, 'text/html')
+                except Exception as e:
+                    logger.error(f"发送错误响应失败: {e}")
             
             def log_message(self, format, *args):
-                # 简化日志输出
+                # 简化日志输出，避免过多日志
                 pass
         
         # 创建服务器
         def handler_factory(*args, **kwargs):
             return RequestHandler(*args, web_server=self, **kwargs)
         
-        self.server = HTTPServer((self.host, self.port), handler_factory)
-        
-        # 在后台线程启动服务器
-        def run_server():
-            self.server.serve_forever()
-        
-        self.server_thread = threading.Thread(target=run_server, daemon=True)
-        self.server_thread.start()
+        try:
+            self.server = HTTPServer((self.host, self.port), handler_factory)
+            self.server.timeout = 1  # 设置超时，便于响应关闭信号
+            
+            # 在后台线程启动服务器
+            def run_server():
+                try:
+                    logger.info(f"HTTP服务器线程启动，监听 {self.host}:{self.port}")
+                    while not self._shutdown_event.is_set():
+                        self.server.handle_request()
+                except Exception as e:
+                    if not self._shutdown_event.is_set():
+                        logger.error(f"HTTP服务器运行错误: {e}")
+                finally:
+                    logger.info("HTTP服务器线程结束")
+            
+            self.server_thread = threading.Thread(target=run_server, daemon=True)
+            self.server_thread.start()
+            
+        except Exception as e:
+            logger.error(f"启动HTTP服务器失败: {e}")
+            raise
     
     async def _setup_static_resources(self):
         """设置静态资源"""
@@ -321,13 +392,16 @@ class WebVisualizationServer:
     
     async def _update_index_page(self):
         """更新首页"""
-        index_content = self.templates.generate_index_page(
-            self.visualizations, self._get_server_info()
-        )
-        
-        index_path = os.path.join(self.web_dir, 'index.html')
-        with open(index_path, 'w', encoding='utf-8') as f:
-            f.write(index_content)
+        try:
+            index_content = self.templates.generate_index_page(
+                self.visualizations, self._get_server_info()
+            )
+            
+            index_path = os.path.join(self.web_dir, 'index.html')
+            with open(index_path, 'w', encoding='utf-8') as f:
+                f.write(index_content)
+        except Exception as e:
+            logger.error(f"更新首页失败: {e}")
     
     def _get_base_url(self) -> str:
         """获取基础URL"""
@@ -374,4 +448,7 @@ async def stop_web_server():
     
     if _web_server_instance:
         _web_server_instance.stop()
+        # 等待一小段时间确保清理完成
+        await asyncio.sleep(0.5)
         _web_server_instance = None
+        logger.info("Web服务器实例已清理")
