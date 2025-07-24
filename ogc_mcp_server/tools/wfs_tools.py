@@ -1,6 +1,6 @@
 """WFS工具模块
 
-提供WFS相关的工具函数，包括要素数据获取和GeoJSON可视化
+提供WFS相关的工具函数，统一使用Web服务器提供可视化
 """
 
 import logging
@@ -11,11 +11,7 @@ from typing_extensions import Annotated
 
 from ..database import get_layer_repository, LayerResourceQuery
 from ..utils.ogc_parser import get_ogc_parser
-from ..utils.geojson_utils import (
-    fetch_geojson_data, analyze_geojson_data, parse_style_config,
-    calculate_map_center, save_geojson_map_file
-)
-from ..utils.html_templates import generate_geojson_map_html
+from ..services.web_server.server import get_web_server
 
 logger = logging.getLogger(__name__)
 
@@ -90,13 +86,12 @@ async def get_wfs_geojson_data(
     max_features: Annotated[int, Field(description="最大要素数量", ge=1, le=1000)] = 100,
     bbox: Annotated[Optional[str], Field(description="边界框过滤，格式：min_x,min_y,max_x,max_y")] = None,
     cql_filter: Annotated[Optional[str], Field(description="CQL过滤条件")] = None,
-    save_to_file: Annotated[bool, Field(description="是否保存GeoJSON数据到文件")] = True,
     ctx: Context = None
 ) -> Dict[str, Any]:
     """获取WFS图层的GeoJSON数据
     
     直接获取WFS图层的GeoJSON格式数据，支持空间和属性过滤。
-    为避免上下文长度超限，默认将GeoJSON数据保存到文件而不在响应中返回完整数据。
+    返回数据统计信息和示例要素，完整数据通过Web可视化查看。
     """
     if ctx:
         await ctx.info(f"正在获取WFS图层GeoJSON数据: {layer_name}")
@@ -127,13 +122,8 @@ async def get_wfs_geojson_data(
             params["cql_filter"] = cql_filter
         
         # 获取GeoJSON数据
-        geojson_data = await fetch_geojson_data(layer.service_url, params, ctx)
-        stats = analyze_geojson_data(geojson_data)
-        
-        # 保存GeoJSON数据到文件（如果需要）
-        geojson_file_path = None
-        if save_to_file:
-            geojson_file_path = await _save_geojson_to_file(layer_name, geojson_data)
+        geojson_data = await _fetch_geojson_data(layer.service_url, params, ctx)
+        stats = _analyze_geojson_data(geojson_data)
         
         # 提取前几个要素作为示例（避免返回完整数据）
         sample_features = []
@@ -152,7 +142,6 @@ async def get_wfs_geojson_data(
             },
             "statistics": stats,
             "sample_features": sample_features,  # 只返回前几个要素作为示例
-            "geojson_file": geojson_file_path,   # 完整数据文件路径
             "parameters": {
                 "max_features": max_features,
                 "bbox": bbox,
@@ -161,7 +150,16 @@ async def get_wfs_geojson_data(
             "data_info": {
                 "total_features": stats["feature_count"],
                 "sample_count": len(sample_features),
-                "note": "完整GeoJSON数据已保存到文件，此处仅显示前几个要素作为示例"
+                "note": "此处仅显示前几个要素作为示例，完整数据请使用Web可视化功能查看"
+            },
+            "instructions": {
+                "visualization": "使用 create_geojson_visualization 工具创建完整的Web可视化",
+                "features": [
+                    "完整的GeoJSON要素数据展示",
+                    "交互式地图浏览",
+                    "要素属性查看",
+                    "空间分析功能"
+                ]
             }
         }
         
@@ -180,7 +178,7 @@ async def get_wfs_geojson_data(
 
 
 @wfs_server.tool
-async def create_geojson_map(
+async def create_geojson_visualization(
     layer_name: Annotated[str, Field(description="WFS图层名称")],
     max_features: Annotated[int, Field(description="最大要素数量", ge=1, le=1000)] = 100,
     width: Annotated[int, Field(description="地图容器宽度", ge=300, le=2000)] = 1000,
@@ -190,139 +188,178 @@ async def create_geojson_map(
     bbox: Annotated[Optional[str], Field(description="边界框过滤，格式：min_x,min_y,max_x,max_y")] = None,
     ctx: Context = None
 ) -> Dict[str, Any]:
-    """创建WFS GeoJSON交互式地图
+    """创建WFS GeoJSON Web可视化
     
-    获取WFS图层数据并创建包含GeoJSON要素渲染的交互式地图。
-    支持要素样式自定义、属性弹窗、图层控制等功能。
-    为避免上下文长度超限，不在响应中返回完整的HTML内容和GeoJSON数据。
+    在统一Web服务器中创建WFS图层的GeoJSON交互式地图可视化。
     """
     if ctx:
-        await ctx.info(f"正在创建WFS GeoJSON交互式地图: {layer_name}")
+        await ctx.info(f"正在创建WFS GeoJSON可视化: {layer_name}")
     
     try:
-        # 获取GeoJSON数据（内部处理，不返回完整数据）
-        geojson_result = await _get_geojson_data_internal(
-            layer_name, max_features, bbox, None, ctx
-        )
+        # 获取图层信息
+        repository = await get_layer_repository()
+        query = LayerResourceQuery(layer_name=layer_name, service_type="WFS", limit=1)
+        layers = await repository.list_resources(query)
         
-        geojson_data = geojson_result["geojson"]
-        layer_info = geojson_result["layer_info"]
-        stats = geojson_result["statistics"]
+        if not layers:
+            raise ValueError(f"未找到WFS图层: {layer_name}")
         
-        # 解析样式配置和计算地图中心点
-        style_options = parse_style_config(style_config)
-        center_lat, center_lng = calculate_map_center(geojson_data, layer_info)
+        layer = layers[0]
         
-        # 生成交互式地图HTML
-        html_content = generate_geojson_map_html(
-            layer_name, layer_info, geojson_data, stats, style_options,
-            center_lat, center_lng, width, height, initial_zoom
-        )
-        
-        # 保存HTML文件
-        html_path = save_geojson_map_file(layer_name, html_content)
-        
-        result = {
-            "layer_info": layer_info,
-            "geojson_statistics": stats,
-            "map_config": {
-                "center": [center_lat, center_lng],
-                "zoom": initial_zoom,
-                "width": width,
-                "height": height,
-                "style": style_options
-            },
-            "html_file": html_path,
-            "file_size_kb": len(html_content) // 1024,  # 文件大小（KB）
-            "instructions": {
-                "usage": "在浏览器中打开生成的HTML文件即可查看GeoJSON交互式地图",
-                "file_location": html_path,
-                "features": [
-                    "GeoJSON要素渲染和可视化",
-                    "要素点击显示属性信息",
-                    "支持缩放和平移操作",
-                    "图层控制和样式切换",
-                    "要素高亮和选择",
-                    "坐标显示和测量工具"
-                ],
-                "note": "HTML内容已保存到文件，此处不显示完整内容以避免上下文长度超限"
-            }
+        # 构建WFS GetFeature请求参数
+        params = {
+            "service": "WFS",
+            "version": "2.0.0",
+            "request": "GetFeature",
+            "typeName": layer.layer_name,
+            "outputFormat": "application/json",
+            "maxFeatures": max_features
         }
         
-        if ctx:
-            await ctx.info(f"GeoJSON交互式地图创建成功: {layer_name}，HTML文件: {html_path}")
+        if bbox:
+            params["bbox"] = bbox
         
-        logger.info(f"GeoJSON交互式地图创建成功: {layer_name}，要素数量: {stats['feature_count']}")
-        return result
+        # 获取GeoJSON数据
+        geojson_data = await _fetch_geojson_data(layer.service_url, params, ctx)
+        stats = _analyze_geojson_data(geojson_data)
         
-    except Exception as e:
-        error_msg = f"创建GeoJSON交互式地图失败: {e}"
-        logger.error(error_msg)
-        if ctx:
-            await ctx.error(error_msg)
-        raise
-
-
-# 内部辅助函数
-async def _get_geojson_data_internal(
-    layer_name: str, max_features: int, bbox: Optional[str], 
-    cql_filter: Optional[str], ctx: Context = None
-) -> Dict[str, Any]:
-    """内部获取GeoJSON数据函数，返回完整数据用于地图生成"""
-    repository = await get_layer_repository()
-    query = LayerResourceQuery(layer_name=layer_name, service_type="WFS", limit=1)
-    layers = await repository.list_resources(query)
-    
-    if not layers:
-        raise ValueError(f"未找到WFS图层: {layer_name}")
-    
-    layer = layers[0]
-    
-    # 构建WFS GetFeature请求参数
-    params = {
-        "service": "WFS",
-        "version": "2.0.0",
-        "request": "GetFeature",
-        "typeName": layer.layer_name,
-        "outputFormat": "application/json",
-        "maxFeatures": max_features
-    }
-    
-    if bbox:
-        params["bbox"] = bbox
-    if cql_filter:
-        params["cql_filter"] = cql_filter
-    
-    # 获取GeoJSON数据
-    geojson_data = await fetch_geojson_data(layer.service_url, params, ctx)
-    stats = analyze_geojson_data(geojson_data)
-    
-    return {
-        "layer_info": {
+        # 构建图层信息
+        layer_info = {
             "resource_id": layer.resource_id,
             "service_name": layer.service_name,
             "service_url": layer.service_url,
             "layer_name": layer.layer_name,
             "layer_title": layer.layer_title,
             "crs": layer.crs
-        },
-        "geojson": geojson_data,
-        "statistics": stats
+        }
+        
+        # 解析样式配置
+        style_options = _parse_style_config(style_config)
+        
+        # 构建地图配置
+        map_config = {
+            "center": [39.9042, 116.4074],  # 默认中心点，Web服务器会自动计算
+            "zoom": initial_zoom,
+            "width": width,
+            "height": height,
+            "style": style_options
+        }
+        
+        # 获取Web服务器并添加可视化
+        web_server = await get_web_server()
+        visualization_url = await web_server.add_geojson_visualization(
+            layer_name, layer_info, geojson_data, stats, map_config
+        )
+        
+        result = {
+            "visualization_info": {
+                "type": "geojson",
+                "layer_name": layer_name,
+                "url": visualization_url,
+                "web_server": web_server._get_base_url()
+            },
+            "layer_info": layer_info,
+            "geojson_statistics": stats,
+            "map_config": map_config,
+            "instructions": {
+                "access": f"在浏览器中访问: {visualization_url}",
+                "web_server": f"Web服务器首页: {web_server._get_base_url()}",
+                "features": [
+                    "WFS GeoJSON要素可视化",
+                    "要素属性弹窗查看",
+                    "交互式地图操作",
+                    "样式自定义和图层控制",
+                    "坐标显示和测量工具"
+                ]
+            }
+        }
+        
+        if ctx:
+            await ctx.info(f"GeoJSON可视化创建成功，要素数量: {stats['feature_count']}，访问地址: {visualization_url}")
+        
+        logger.info(f"GeoJSON可视化创建成功: {layer_name}，要素数量: {stats['feature_count']}")
+        return result
+        
+    except Exception as e:
+        error_msg = f"创建GeoJSON可视化失败: {e}"
+        logger.error(error_msg)
+        if ctx:
+            await ctx.error(error_msg)
+        raise
+
+
+# 内部辅助函数（简化版，主要逻辑移到Web服务器）
+async def _fetch_geojson_data(base_url: str, params: Dict[str, Any], ctx: Context = None) -> Dict[str, Any]:
+    """获取GeoJSON数据"""
+    import httpx
+    import json
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(base_url, params=params)
+            if response.status_code == 200:
+                content_type = response.headers.get('content-type', '')
+                if 'json' in content_type:
+                    return response.json()
+                else:
+                    text_content = response.text
+                    return json.loads(text_content)
+            else:
+                raise Exception(f"HTTP请求失败: {response.status_code}")
+    except Exception as e:
+        logger.error(f"获取GeoJSON数据失败: {e}")
+        raise
+
+
+def _analyze_geojson_data(geojson_data: Dict[str, Any]) -> Dict[str, Any]:
+    """分析GeoJSON数据统计信息"""
+    if not geojson_data or geojson_data.get("type") != "FeatureCollection":
+        return {"feature_count": 0, "geometry_types": [], "properties": []}
+    
+    features = geojson_data.get("features", [])
+    geometry_types = set()
+    property_names = set()
+    
+    for feature in features:
+        # 统计几何类型
+        geometry = feature.get("geometry", {})
+        if geometry:
+            geometry_types.add(geometry.get("type", "Unknown"))
+        
+        # 统计属性字段
+        properties = feature.get("properties", {})
+        if properties:
+            property_names.update(properties.keys())
+    
+    return {
+        "feature_count": len(features),
+        "geometry_types": list(geometry_types),
+        "properties": list(property_names),
+        "has_geometry": len(geometry_types) > 0,
+        "has_properties": len(property_names) > 0
     }
 
 
-async def _save_geojson_to_file(layer_name: str, geojson_data: Dict[str, Any]) -> str:
-    """保存GeoJSON数据到文件"""
-    import os
-    import tempfile
+def _parse_style_config(style_config: Optional[str]) -> Dict[str, Any]:
+    """解析样式配置"""
     import json
     
-    # 创建临时GeoJSON文件
-    temp_dir = tempfile.gettempdir()
-    geojson_filename = f"geojson_data_{layer_name.replace(':', '_').replace('/', '_')}.json"
-    geojson_path = os.path.join(temp_dir, geojson_filename)
+    default_style = {
+        "color": "#3388ff",
+        "weight": 3,
+        "opacity": 0.8,
+        "fillColor": "#3388ff",
+        "fillOpacity": 0.2,
+        "radius": 6
+    }
     
-    with open(geojson_path, 'w', encoding='utf-8') as f:
-        json.dump(geojson_data, f, ensure_ascii=False, indent=2)
+    if not style_config:
+        return default_style
     
-    return geojson_path
+    try:
+        custom_style = json.loads(style_config)
+        default_style.update(custom_style)
+        return default_style
+    except json.JSONDecodeError:
+        logger.warning("样式配置JSON解析失败，使用默认样式")
+        return default_style

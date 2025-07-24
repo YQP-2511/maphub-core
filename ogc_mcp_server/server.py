@@ -12,12 +12,12 @@ from fastmcp import FastMCP
 
 from .database import init_database, close_database
 from .utils.ogc_parser import get_ogc_parser
+from .services.web_server.server import get_web_server, stop_web_server
 
 # 导入子服务器模块
 from .tools.management_tools import management_server
 from .tools.wms_tools import wms_server  
 from .tools.wfs_tools import wfs_server
-from .tools.web_tools import web_server
 from .resources.layer_resources import layer_resource_server
 
 # 配置日志
@@ -39,17 +39,24 @@ async def lifespan(app):
     await init_database()
     logger.info("数据库初始化完成")
     
+    # 启动统一Web可视化服务器
+    try:
+        web_server = await get_web_server(port=8080)
+        logger.info(f"统一Web可视化服务器启动成功: {web_server._get_base_url()}")
+    except Exception as e:
+        logger.error(f"启动Web可视化服务器失败: {e}")
+        # 不阻止MCP服务器启动
+    
     # 只在第一次启动时导入子服务器
     if not _servers_imported:
         logger.info("正在组合子服务器...")
         
         try:
             # 导入各个子服务器的组件（异步操作）
-            await app.import_server(management_server, prefix="mgmt")  # 管理工具
-            await app.import_server(wms_server, prefix="wms")          # WMS工具
-            await app.import_server(wfs_server, prefix="wfs")          # WFS工具
-            await app.import_server(web_server, prefix="web")          # Web服务工具
-            await app.import_server(layer_resource_server)             # 图层资源（无前缀）
+            await app.import_server(management_server, prefix="mgmt")        # 管理工具
+            await app.import_server(wms_server, prefix="wms")               # WMS工具
+            await app.import_server(wfs_server, prefix="wfs")               # WFS工具
+            await app.import_server(layer_resource_server)                  # 图层资源（无前缀）
             
             _servers_imported = True
             
@@ -58,7 +65,6 @@ async def lifespan(app):
             logger.info("- 管理工具 (mgmt_*)")
             logger.info("- WMS工具 (wms_*)")
             logger.info("- WFS工具 (wfs_*)")
-            logger.info("- Web服务工具 (web_*)")
             logger.info("- 图层资源")
             
         except Exception as e:
@@ -75,6 +81,13 @@ async def lifespan(app):
     
     # 关闭时的清理操作
     logger.info("正在关闭OGC MCP服务器...")
+    
+    # 停止Web可视化服务器
+    try:
+        await stop_web_server()
+        logger.info("Web可视化服务器已停止")
+    except Exception as e:
+        logger.error(f"停止Web可视化服务器失败: {e}")
     
     # 关闭数据库连接
     await close_database()
