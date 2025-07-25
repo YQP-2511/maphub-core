@@ -9,9 +9,12 @@ import threading
 import json
 import shutil
 import atexit
+import re
+import hashlib
+import time
 from typing import Dict, Any, Optional, List
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote
 import tempfile
 import os
 
@@ -59,6 +62,71 @@ class WebVisualizationServer:
         
         # 注册退出时的清理函数
         atexit.register(self._cleanup_on_exit)
+    
+    def _generate_safe_id(self, title: str, prefix: str = "", max_length: int = 50) -> str:
+        """生成安全的URL ID
+        
+        Args:
+            title: 原始标题
+            prefix: ID前缀
+            max_length: 最大长度
+            
+        Returns:
+            安全的URL ID
+        """
+        # 移除或替换特殊字符
+        safe_title = re.sub(r'[^\w\s-]', '', title)
+        safe_title = re.sub(r'[-\s]+', '_', safe_title)
+        
+        # 如果包含中文或其他非ASCII字符，使用英文替换或哈希
+        if not safe_title.isascii() or not safe_title:
+            # 预定义的中文到英文映射
+            chinese_to_english = {
+                '分层地图': 'layered_map',
+                '可视化': 'visualization',
+                '底图': 'basemap',
+                '数据图层': 'data_layer',
+                '复合': 'composite',
+                '地图': 'map',
+                '图层': 'layer',
+                'WMS': 'wms',
+                'WFS': 'wfs',
+                'GeoJSON': 'geojson'
+            }
+            
+            # 尝试翻译常见中文词汇
+            english_title = title
+            for chinese, english in chinese_to_english.items():
+                english_title = english_title.replace(chinese, english)
+            
+            # 再次清理
+            safe_title = re.sub(r'[^\w\s-]', '', english_title)
+            safe_title = re.sub(r'[-\s]+', '_', safe_title)
+            
+            # 如果仍然包含非ASCII字符，使用哈希
+            if not safe_title.isascii() or not safe_title:
+                # 使用标题的哈希值作为ID
+                hash_value = hashlib.md5(title.encode('utf-8')).hexdigest()[:8]
+                safe_title = f"viz_{hash_value}"
+        
+        # 限制长度
+        if len(safe_title) > max_length:
+            safe_title = safe_title[:max_length]
+        
+        # 添加前缀
+        if prefix:
+            safe_id = f"{prefix}_{safe_title}"
+        else:
+            safe_id = safe_title
+        
+        # 确保ID唯一性
+        base_id = safe_id
+        counter = 1
+        while safe_id in self.visualizations:
+            safe_id = f"{base_id}_{counter}"
+            counter += 1
+        
+        return safe_id.lower()
         
     async def start(self) -> Dict[str, Any]:
         """启动Web服务器
@@ -182,7 +250,7 @@ class WebVisualizationServer:
         Returns:
             可视化页面URL
         """
-        viz_id = f"wms_{layer_name.replace(':', '_').replace('/', '_')}"
+        viz_id = self._generate_safe_id(layer_name, "wms")
         
         # 生成WMS地图HTML
         html_content = await self.map_handler.generate_wms_map(
@@ -225,7 +293,7 @@ class WebVisualizationServer:
         Returns:
             可视化页面URL
         """
-        viz_id = f"geojson_{layer_name.replace(':', '_').replace('/', '_')}"
+        viz_id = self._generate_safe_id(layer_name, "geojson")
         
         # 生成GeoJSON地图HTML
         html_content = await self.geojson_handler.generate_geojson_map(
@@ -266,8 +334,8 @@ class WebVisualizationServer:
         Returns:
             可视化页面URL
         """
-        # 生成可视化ID
-        viz_id = f"composite_{title.replace(' ', '_').replace(':', '_').replace('/', '_')}"
+        # 使用新的安全ID生成函数
+        viz_id = self._generate_safe_id(title, "composite")
         
         try:
             # 处理图层数据
@@ -466,95 +534,112 @@ class WebVisualizationServer:
             def _serve_api(self):
                 """提供API接口"""
                 try:
-                    data = self.web_server.list_visualizations()
-                    content = json.dumps(data, ensure_ascii=False, indent=2)
-                    self._send_response(200, content, 'application/json')
+                    if self.command == 'GET':
+                        # 返回可视化列表
+                        visualizations = self.web_server.list_visualizations()
+                        self._send_json_response(200, visualizations)
+                    else:
+                        self._send_error(405, "方法不允许")
                 except Exception as e:
                     self._send_error(500, str(e))
             
-            def _serve_visualization_api(self, viz_id: str):
+            def _serve_visualization_api(self, viz_id):
                 """提供单个可视化API"""
                 try:
                     if self.command == 'GET':
-                        # 获取可视化信息
+                        # 返回可视化信息
                         viz_info = self.web_server.get_visualization_by_id(viz_id)
                         if viz_info:
-                            content = json.dumps(viz_info, ensure_ascii=False, indent=2)
-                            self._send_response(200, content, 'application/json')
+                            self._send_json_response(200, viz_info)
                         else:
                             self._send_error(404, f"可视化未找到: {viz_id}")
-                    
                     elif self.command == 'DELETE':
                         # 删除可视化
                         success = self.web_server.remove_visualization(viz_id)
                         if success:
-                            content = json.dumps({"message": "删除成功"}, ensure_ascii=False)
-                            self._send_response(200, content, 'application/json')
+                            self._send_json_response(200, {"message": "删除成功"})
                         else:
                             self._send_error(404, f"可视化未找到: {viz_id}")
-                    
                     else:
                         self._send_error(405, "方法不允许")
-                        
                 except Exception as e:
                     self._send_error(500, str(e))
             
-            def _serve_static_file(self, filename):
+            def _serve_static_file(self, path):
                 """提供静态文件"""
-                self._send_error(404, f"静态文件未找到: {filename}")
-            
-            def _send_response(self, status_code, content, content_type):
-                """发送响应"""
                 try:
-                    self.send_response(status_code)
-                    self.send_header('Content-Type', f'{content_type}; charset=utf-8')
-                    self.send_header('Content-Length', str(len(content.encode('utf-8'))))
-                    self.send_header('Access-Control-Allow-Origin', '*')
-                    self.send_header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS')
-                    self.send_header('Access-Control-Allow-Headers', 'Content-Type')
-                    self.end_headers()
-                    self.wfile.write(content.encode('utf-8'))
+                    # 简单的静态文件服务
+                    self._send_error(404, f"静态文件未找到: {path}")
                 except Exception as e:
-                    logger.error(f"发送响应失败: {e}")
+                    self._send_error(500, str(e))
+            
+            def _send_response(self, status_code, content, content_type='text/html'):
+                """发送响应"""
+                self.send_response(status_code)
+                self.send_header('Content-Type', f'{content_type}; charset=utf-8')
+                self.send_header('Content-Length', str(len(content.encode('utf-8'))))
+                self.end_headers()
+                self.wfile.write(content.encode('utf-8'))
+            
+            def _send_json_response(self, status_code, data):
+                """发送JSON响应"""
+                content = json.dumps(data, ensure_ascii=False, indent=2)
+                self._send_response(status_code, content, 'application/json')
             
             def _send_error(self, status_code, message):
                 """发送错误响应"""
-                try:
-                    content = f"<html><body><h1>错误 {status_code}</h1><p>{message}</p></body></html>"
-                    self._send_response(status_code, content, 'text/html')
-                except Exception as e:
-                    logger.error(f"发送错误响应失败: {e}")
+                error_content = f"""
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>错误 {status_code}</title>
+                    <meta charset="utf-8">
+                </head>
+                <body>
+                    <h1>错误 {status_code}</h1>
+                    <p>{message}</p>
+                    <p><a href="/">返回首页</a></p>
+                </body>
+                </html>
+                """
+                self._send_response(status_code, error_content)
             
             def log_message(self, format, *args):
-                # 简化日志输出，避免过多日志
+                """重写日志方法，避免过多输出"""
                 pass
         
-        # 创建服务器
-        def handler_factory(*args, **kwargs):
+        # 创建HTTP服务器
+        def create_handler(*args, **kwargs):
             return RequestHandler(*args, web_server=self, **kwargs)
         
-        try:
-            self.server = HTTPServer((self.host, self.port), handler_factory)
-            self.server.timeout = 1  # 设置超时，便于响应关闭信号
-            
-            # 在后台线程启动服务器
-            def run_server():
-                try:
-                    logger.info(f"HTTP服务器线程启动，监听 {self.host}:{self.port}")
-                    while not self._shutdown_event.is_set():
-                        self.server.handle_request()
-                except Exception as e:
-                    if not self._shutdown_event.is_set():
-                        logger.error(f"HTTP服务器运行错误: {e}")
-                finally:
-                    logger.info("HTTP服务器线程结束")
-            
-            self.server_thread = threading.Thread(target=run_server, daemon=True)
-            self.server_thread.start()
-            
-        except Exception as e:
-            logger.error(f"启动HTTP服务器失败: {e}")
-            raise
+        self.server = HTTPServer((self.host, self.port), create_handler)
+        
+        # 在单独线程中运行服务器
+        def run_server():
+            try:
+                logger.info(f"HTTP服务器启动在 {self.host}:{self.port}")
+                self.server.serve_forever()
+            except Exception as e:
+                if not self._shutdown_event.is_set():
+                    logger.error(f"HTTP服务器运行失败: {e}")
+        
+        self.server_thread = threading.Thread(target=run_server, daemon=True)
+        self.server_thread.start()
+    
+    def _get_base_url(self) -> str:
+        """获取基础URL"""
+        return f"http://{self.host}:{self.port}"
+    
+    def _get_server_info(self) -> Dict[str, Any]:
+        """获取服务器信息"""
+        return {
+            "host": self.host,
+            "port": self.port,
+            "base_url": self._get_base_url(),
+            "status": "running" if self.is_running else "stopped",
+            "web_dir": self.web_dir,
+            "visualizations_count": len(self.visualizations)
+        }
     
     async def _setup_static_resources(self):
         """设置静态资源"""
@@ -564,51 +649,39 @@ class WebVisualizationServer:
     async def _update_index_page(self):
         """更新首页"""
         try:
-            index_content = self.templates.generate_index_page(
+            # 生成首页HTML
+            html_content = self.templates.generate_index_page(
                 self.visualizations, self._get_server_info()
             )
             
+            # 保存首页
             index_path = os.path.join(self.web_dir, 'index.html')
             with open(index_path, 'w', encoding='utf-8') as f:
-                f.write(index_content)
+                f.write(html_content)
+                
         except Exception as e:
             logger.error(f"更新首页失败: {e}")
-    
-    def _get_base_url(self) -> str:
-        """获取基础URL"""
-        return f"http://{self.host}:{self.port}"
-    
-    def _get_server_info(self) -> Dict[str, Any]:
-        """获取服务器信息"""
-        return {
-            "status": "running" if self.is_running else "stopped",
-            "host": self.host,
-            "port": self.port,
-            "base_url": self._get_base_url(),
-            "web_directory": self.web_dir,
-            "total_visualizations": len(self.visualizations)
-        }
 
 
 # 全局Web服务器实例
 _web_server_instance = None
+_web_server_lock = asyncio.Lock()
 
 
-async def get_web_server(port: int = 8080, host: str = "localhost") -> WebVisualizationServer:
+async def get_web_server() -> WebVisualizationServer:
     """获取Web服务器实例（单例模式）
     
-    Args:
-        port: 服务端口
-        host: 服务主机
-        
     Returns:
         Web服务器实例
     """
     global _web_server_instance
     
-    if _web_server_instance is None:
-        _web_server_instance = WebVisualizationServer(port, host)
-        await _web_server_instance.start()
+    async with _web_server_lock:
+        if _web_server_instance is None:
+            _web_server_instance = WebVisualizationServer()
+            await _web_server_instance.start()
+        elif not _web_server_instance.is_running:
+            await _web_server_instance.start()
     
     return _web_server_instance
 
