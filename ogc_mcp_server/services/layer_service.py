@@ -210,6 +210,8 @@ async def list_registered_layers(
 ) -> Dict[str, Any]:
     """列出已注册的图层资源
     
+    查询已注册的OGC图层资源，支持按服务类型、服务名称、图层名称进行筛选
+    
     Args:
         service_type: 按服务类型筛选（可选）
         service_name: 按服务名称筛选（可选）
@@ -222,27 +224,27 @@ async def list_registered_layers(
         图层资源列表和统计信息
     """
     if ctx:
-        await ctx.info("正在查询已注册的图层资源")
-    
-    # 获取仓储
-    repository = await get_layer_repository()
-    
-    # 构建查询参数
-    from ..database.models import LayerResourceQuery
-    query = LayerResourceQuery(
-        service_type=service_type,
-        service_name=service_name,
-        layer_name=layer_name,
-        limit=limit,
-        offset=offset
-    )
+        await ctx.info(f"正在查询图层资源，筛选条件: 类型={service_type}, 服务={service_name}, 图层={layer_name}")
     
     try:
+        # 获取仓储
+        repository = await get_layer_repository()
+        
+        # 构建查询对象
+        from ..database.models import LayerResourceQuery
+        query = LayerResourceQuery(
+            service_type=service_type,
+            service_name=service_name,
+            layer_name=layer_name,
+            limit=limit,
+            offset=offset
+        )
+        
         # 查询图层资源
         layers = await repository.list_resources(query)
         total_count = await repository.count(query)
         
-        # 转换为字典格式
+        # 转换为字典格式（只包含基础元数据）
         layer_list = []
         for layer in layers:
             layer_dict = {
@@ -253,8 +255,6 @@ async def list_registered_layers(
                 "layer_name": layer.layer_name,
                 "layer_title": layer.layer_title,
                 "layer_abstract": layer.layer_abstract,
-                "crs": layer.crs,
-                "bbox": layer.bbox.to_dict() if layer.bbox else None,
                 "created_at": layer.created_at.isoformat(),
                 "updated_at": layer.updated_at.isoformat()
             }
@@ -436,8 +436,6 @@ async def update_layer_resource(
                     "layer_name": updated_layer.layer_name,
                     "layer_title": updated_layer.layer_title,
                     "layer_abstract": updated_layer.layer_abstract,
-                    "crs": updated_layer.crs,
-                    "bbox": updated_layer.bbox.to_dict() if updated_layer.bbox else None,
                     "updated_at": updated_layer.updated_at.isoformat()
                 }
             }
@@ -509,7 +507,6 @@ async def get_layer_statistics(ctx: Context = None) -> Dict[str, Any]:
         
         # 按服务名称统计
         service_stats = {}
-        crs_stats = {}
         
         for layer in all_layers:
             # 服务统计
@@ -522,12 +519,6 @@ async def get_layer_statistics(ctx: Context = None) -> Dict[str, Any]:
                     "layer_count": 0
                 }
             service_stats[service_key]["layer_count"] += 1
-            
-            # CRS统计
-            if layer.crs:
-                if layer.crs not in crs_stats:
-                    crs_stats[layer.crs] = 0
-                crs_stats[layer.crs] += 1
         
         # 构建统计结果
         result = {
@@ -537,7 +528,6 @@ async def get_layer_statistics(ctx: Context = None) -> Dict[str, Any]:
                 "WFS": wfs_count
             },
             "service_statistics": list(service_stats.values()),
-            "crs_distribution": dict(sorted(crs_stats.items(), key=lambda x: x[1], reverse=True)),
             "top_services": sorted(
                 service_stats.values(), 
                 key=lambda x: x["layer_count"], 

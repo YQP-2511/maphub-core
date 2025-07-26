@@ -12,7 +12,7 @@ from owslib.wms import WebMapService
 from owslib.wfs import WebFeatureService
 from owslib.util import ServiceException
 
-from ..database.models import LayerResourceCreate, BoundingBox
+from ..database.models import LayerResourceCreate
 
 logger = logging.getLogger(__name__)
 
@@ -176,33 +176,14 @@ class OGCServiceParser:
             # 遍历所有图层
             for layer_name, layer in wms.contents.items():
                 try:
-                    # 提取边界框信息
-                    bbox = None
-                    if hasattr(layer, 'boundingBoxWGS84') and layer.boundingBoxWGS84:
-                        bbox_coords = layer.boundingBoxWGS84
-                        bbox = BoundingBox(
-                            min_x=bbox_coords[0],
-                            min_y=bbox_coords[1],
-                            max_x=bbox_coords[2],
-                            max_y=bbox_coords[3],
-                            crs="EPSG:4326"
-                        )
-                    
-                    # 获取默认CRS
-                    default_crs = None
-                    if hasattr(layer, 'crsOptions') and layer.crsOptions:
-                        default_crs = layer.crsOptions[0]
-                    
-                    # 创建图层资源对象（使用找到的工作URL）
+                    # 创建图层资源对象（只保存基础元数据）
                     layer_resource = LayerResourceCreate(
                         service_name=service_name,
                         service_url=working_url,
                         service_type='WMS',
                         layer_name=layer_name,
                         layer_title=getattr(layer, 'title', layer_name),
-                        layer_abstract=getattr(layer, 'abstract', None),
-                        crs=default_crs,
-                        bbox=bbox
+                        layer_abstract=getattr(layer, 'abstract', None)
                     )
                     
                     layers.append(layer_resource)
@@ -291,35 +272,14 @@ class OGCServiceParser:
             # 遍历所有要素类型
             for feature_type_name, feature_type in wfs.contents.items():
                 try:
-                    # 提取边界框信息
-                    bbox = None
-                    if hasattr(feature_type, 'boundingBoxWGS84') and feature_type.boundingBoxWGS84:
-                        bbox_coords = feature_type.boundingBoxWGS84
-                        bbox = BoundingBox(
-                            min_x=bbox_coords[0],
-                            min_y=bbox_coords[1],
-                            max_x=bbox_coords[2],
-                            max_y=bbox_coords[3],
-                            crs="EPSG:4326"
-                        )
-                    
-                    # 获取默认CRS并标准化
-                    default_crs = None
-                    if hasattr(feature_type, 'crsOptions') and feature_type.crsOptions:
-                        raw_crs = feature_type.crsOptions[0]
-                        default_crs = self._normalize_crs(raw_crs)
-                        logger.debug(f"WFS要素类型 {feature_type_name} CRS: {raw_crs} -> {default_crs}")
-                    
-                    # 创建图层资源对象（使用找到的工作URL）
+                    # 创建图层资源对象（只保存基础元数据）
                     layer_resource = LayerResourceCreate(
                         service_name=service_name,
                         service_url=working_url,
                         service_type='WFS',
                         layer_name=feature_type_name,
                         layer_title=getattr(feature_type, 'title', feature_type_name),
-                        layer_abstract=getattr(feature_type, 'abstract', None),
-                        crs=default_crs,
-                        bbox=bbox
+                        layer_abstract=getattr(feature_type, 'abstract', None)
                     )
                     
                     layers.append(layer_resource)
@@ -520,26 +480,26 @@ class OGCServiceParser:
         Args:
             base_url: WMS服务基础URL
             layer_name: 图层名称
-            bbox: 边界框 (min_x, min_y, max_x, max_y) - 输入格式始终为经度,纬度
+            bbox: 边界框 (min_x, min_y, max_x, max_y)
             width: 图像宽度
             height: 图像高度
             crs: 坐标参考系统
             format: 图像格式
             
         Returns:
-            GetMap请求URL
+            完整的GetMap请求URL
         """
-        # 清理基础URL，移除现有的查询参数
+        # 清理基础URL
         clean_url = self._clean_base_url(base_url)
         
-        # 默认边界框（全球范围，经度,纬度格式）
-        if not bbox:
-            bbox = (-180, -90, 180, 90)
+        # 如果没有提供bbox，使用默认值
+        if bbox is None:
+            bbox = self._get_default_bbox_for_crs(crs)
         
-        # 根据CRS调整坐标轴顺序
-        adjusted_bbox = self._fix_bbox_axis_order(bbox, crs)
+        # 修复bbox的坐标轴顺序
+        fixed_bbox = self._fix_bbox_axis_order(bbox, crs)
         
-        # 构建GetMap参数
+        # 构建GetMap请求参数
         params = {
             'service': 'WMS',
             'version': '1.3.0',
@@ -547,59 +507,186 @@ class OGCServiceParser:
             'layers': layer_name,
             'styles': '',
             'crs': crs,
-            'bbox': f"{adjusted_bbox[0]},{adjusted_bbox[1]},{adjusted_bbox[2]},{adjusted_bbox[3]}",
+            'bbox': f"{fixed_bbox[0]},{fixed_bbox[1]},{fixed_bbox[2]},{fixed_bbox[3]}",
             'width': str(width),
             'height': str(height),
             'format': format
         }
         
-        # 构建URL
-        url = clean_url + '?' + '&'.join([f"{k}={v}" for k, v in params.items()])
-        
-        return url
-    
-    def get_wfs_feature_url(self, base_url: str, type_name: str,
-                           max_features: int = 100, output_format: str = "application/json") -> str:
-        """生成WFS GetFeature请求URL
+        # 构建完整URL
+        param_string = '&'.join([f"{k}={v}" for k, v in params.items()])
+        return f"{clean_url}?{param_string}"
+
+    async def get_layer_details(self, service_url: str, service_type: str, layer_name: str) -> Dict[str, Any]:
+        """获取指定图层的详细信息
         
         Args:
-            base_url: WFS服务基础URL
-            type_name: 要素类型名称
-            max_features: 最大要素数量
-            output_format: 输出格式
+            service_url: 服务URL
+            service_type: 服务类型（WMS/WFS）
+            layer_name: 图层名称
             
         Returns:
-            GetFeature请求URL
+            图层详细信息，包含bbox、crs等OGC标准参数
+            
+        Raises:
+            ValueError: 当图层不存在或服务不可用时
         """
-        # 清理基础URL，移除现有的查询参数
-        clean_url = self._clean_base_url(base_url)
+        try:
+            service_type = service_type.upper()
+            
+            if service_type == 'WMS':
+                return await self._get_wms_layer_details(service_url, layer_name)
+            elif service_type == 'WFS':
+                return await self._get_wfs_layer_details(service_url, layer_name)
+            else:
+                raise ValueError(f"不支持的服务类型: {service_type}")
+                
+        except Exception as e:
+            logger.error(f"获取图层详细信息失败 {service_url}/{layer_name}: {e}")
+            raise ValueError(f"获取图层详细信息失败: {e}")
+    
+    async def _get_wms_layer_details(self, service_url: str, layer_name: str) -> Dict[str, Any]:
+        """获取WMS图层详细信息
         
-        # 构建GetFeature参数
-        params = {
-            'service': 'WFS',
-            'version': '2.0.0',
-            'request': 'GetFeature',
-            'typeNames': type_name,
-            'maxFeatures': str(max_features),
-            'outputFormat': output_format
+        Args:
+            service_url: WMS服务URL
+            layer_name: 图层名称
+            
+        Returns:
+            WMS图层详细信息
+        """
+        # 查找可用的WMS端点
+        working_url = await self._find_working_endpoint(service_url, 'WMS')
+        if not working_url:
+            working_url = service_url
+        
+        # 标准化URL
+        normalized_url = self._normalize_service_url(working_url, 'WMS')
+        
+        # 创建WMS服务对象
+        wms = WebMapService(normalized_url, timeout=self.timeout)
+        
+        # 查找指定图层
+        if layer_name not in wms.contents:
+            raise ValueError(f"图层 '{layer_name}' 在WMS服务中不存在")
+        
+        layer = wms.contents[layer_name]
+        
+        # 提取图层详细信息
+        details = {
+            "service_type": "WMS",
+            "layer_name": layer_name,
+            "title": getattr(layer, 'title', layer_name),
+            "abstract": getattr(layer, 'abstract', None),
+            "keywords": getattr(layer, 'keywords', []),
+            "bbox": None,
+            "crs_list": [],
+            "default_crs": "EPSG:4326",
+            "styles": [],
+            "queryable": getattr(layer, 'queryable', False),
+            "opaque": getattr(layer, 'opaque', False),
+            "cascaded": getattr(layer, 'cascaded', 0)
         }
         
-        # 构建URL
-        url = clean_url + '?' + '&'.join([f"{k}={v}" for k, v in params.items()])
+        # 提取边界框信息
+        if hasattr(layer, 'boundingBoxWGS84') and layer.boundingBoxWGS84:
+            bbox_wgs84 = layer.boundingBoxWGS84
+            details["bbox"] = {
+                "wgs84": [bbox_wgs84[0], bbox_wgs84[1], bbox_wgs84[2], bbox_wgs84[3]],
+                "crs": "EPSG:4326"
+            }
         
-        return url
+        # 提取支持的坐标系
+        if hasattr(layer, 'crsOptions') and layer.crsOptions:
+            details["crs_list"] = list(layer.crsOptions)
+            # 优先使用EPSG:4326，如果不支持则使用第一个
+            if 'EPSG:4326' in layer.crsOptions:
+                details["default_crs"] = 'EPSG:4326'
+            elif layer.crsOptions:
+                details["default_crs"] = list(layer.crsOptions)[0]
+        
+        # 提取样式信息
+        if hasattr(layer, 'styles') and layer.styles:
+            details["styles"] = [
+                {
+                    "name": style_name,
+                    "title": style.get('title', style_name),
+                    "legend_url": style.get('legend', None)
+                }
+                for style_name, style in layer.styles.items()
+            ]
+        
+        return details
+    
+    async def _get_wfs_layer_details(self, service_url: str, layer_name: str) -> Dict[str, Any]:
+        """获取WFS图层详细信息
+        
+        Args:
+            service_url: WFS服务URL
+            layer_name: 图层名称
+            
+        Returns:
+            WFS图层详细信息
+        """
+        # 查找可用的WFS端点
+        working_url = await self._find_working_endpoint(service_url, 'WFS')
+        if not working_url:
+            working_url = service_url
+        
+        # 标准化URL
+        normalized_url = self._normalize_service_url(working_url, 'WFS')
+        
+        # 创建WFS服务对象
+        wfs = WebFeatureService(normalized_url, timeout=self.timeout)
+        
+        # 查找指定要素类型
+        if layer_name not in wfs.contents:
+            raise ValueError(f"要素类型 '{layer_name}' 在WFS服务中不存在")
+        
+        feature_type = wfs.contents[layer_name]
+        
+        # 提取要素类型详细信息
+        details = {
+            "service_type": "WFS",
+            "layer_name": layer_name,
+            "title": getattr(feature_type, 'title', layer_name),
+            "abstract": getattr(feature_type, 'abstract', None),
+            "keywords": getattr(feature_type, 'keywords', []),
+            "bbox": None,
+            "crs_list": [],
+            "default_crs": "EPSG:4326",
+            "geometry_type": None,
+            "attributes": []
+        }
+        
+        # 提取边界框信息
+        if hasattr(feature_type, 'boundingBoxWGS84') and feature_type.boundingBoxWGS84:
+            bbox_wgs84 = feature_type.boundingBoxWGS84
+            details["bbox"] = {
+                "wgs84": [bbox_wgs84[0], bbox_wgs84[1], bbox_wgs84[2], bbox_wgs84[3]],
+                "crs": "EPSG:4326"
+            }
+        
+        # 提取支持的坐标系
+        if hasattr(feature_type, 'crsOptions') and feature_type.crsOptions:
+            details["crs_list"] = [self._normalize_crs(crs) for crs in feature_type.crsOptions]
+            # 优先使用EPSG:4326
+            normalized_crs_list = details["crs_list"]
+            if 'EPSG:4326' in normalized_crs_list:
+                details["default_crs"] = 'EPSG:4326'
+            elif normalized_crs_list:
+                details["default_crs"] = normalized_crs_list[0]
+        
+        return details
 
 
 # 全局解析器实例
 ogc_parser = OGCServiceParser()
 
-
 async def get_ogc_parser() -> OGCServiceParser:
-    """获取OGC服务解析器实例
-    
-    用于依赖注入
+    """获取OGC解析器实例
     
     Returns:
-        OGC服务解析器实例
+        OGC解析器实例
     """
     return ogc_parser

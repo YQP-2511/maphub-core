@@ -60,28 +60,28 @@ class DatabaseManager:
                 logger.info("数据库连接已关闭")
     
     async def initialize_database(self):
-        """初始化数据库表结构"""
+        """初始化数据库表结构
+        
+        创建基础元数据表，不包含动态参数字段
+        """
         conn = await self.connect()
         
-        # 首先检查表是否存在以及是否需要更新
+        # 检查表是否存在
         cursor = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='layer_resources';")
         table_exists = await cursor.fetchone()
         
         if table_exists:
-            # 检查是否有旧的约束，如果有则重建表
-            cursor = await conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='layer_resources';")
-            table_sql = await cursor.fetchone()
+            # 检查表结构是否需要更新（去除crs和bbox字段）
+            cursor = await conn.execute("PRAGMA table_info(layer_resources);")
+            columns = await cursor.fetchall()
+            column_names = [col[1] for col in columns]
             
-            if table_sql and "UNIQUE(service_url, layer_name)" in table_sql[0]:
-                logger.info("检测到旧的表结构，正在更新...")
-                
-                # 备份数据
-                await conn.execute("CREATE TEMPORARY TABLE layer_resources_backup AS SELECT * FROM layer_resources;")
-                
-                # 删除旧表
-                await conn.execute("DROP TABLE layer_resources;")
+            # 如果存在crs或bbox字段，需要重建表
+            if 'crs' in column_names or 'bbox' in column_names:
+                logger.info("检测到旧的表结构，正在更新为基础元数据表...")
+                await self._migrate_to_basic_metadata(conn)
         
-        # 创建图层资源表（新的约束包含service_type）
+        # 创建基础元数据表（只包含基础字段）
         create_table_sql = """
         CREATE TABLE IF NOT EXISTS layer_resources (
             resource_id TEXT PRIMARY KEY,
@@ -91,8 +91,6 @@ class DatabaseManager:
             layer_name TEXT NOT NULL,
             layer_title TEXT,
             layer_abstract TEXT,
-            crs TEXT,
-            bbox TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             UNIQUE(service_url, layer_name, service_type)
@@ -110,27 +108,72 @@ class DatabaseManager:
         try:
             await conn.execute(create_table_sql)
             
-            # 如果有备份数据，恢复它们
-            cursor = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='layer_resources_backup';")
-            backup_exists = await cursor.fetchone()
-            
-            if backup_exists:
-                logger.info("正在恢复备份数据...")
-                await conn.execute("""
-                    INSERT OR IGNORE INTO layer_resources 
-                    SELECT * FROM layer_resources_backup;
-                """)
-                await conn.execute("DROP TABLE layer_resources_backup;")
-            
             for index_sql in create_indexes_sql:
                 await conn.execute(index_sql)
             
             await conn.commit()
-            logger.info("数据库表结构初始化完成")
+            logger.info("基础元数据表结构初始化完成")
             
         except Exception as e:
             logger.error(f"数据库初始化失败: {e}")
             await conn.rollback()
+            raise
+    
+    async def _migrate_to_basic_metadata(self, conn: aiosqlite.Connection):
+        """迁移到基础元数据表结构
+        
+        Args:
+            conn: 数据库连接
+        """
+        try:
+            # 备份现有数据（只保留基础字段）
+            await conn.execute("""
+                CREATE TEMPORARY TABLE layer_resources_backup AS 
+                SELECT 
+                    resource_id,
+                    service_name,
+                    service_url,
+                    service_type,
+                    layer_name,
+                    layer_title,
+                    layer_abstract,
+                    created_at,
+                    updated_at
+                FROM layer_resources;
+            """)
+            
+            # 删除旧表
+            await conn.execute("DROP TABLE layer_resources;")
+            
+            # 创建新的基础元数据表
+            await conn.execute("""
+                CREATE TABLE layer_resources (
+                    resource_id TEXT PRIMARY KEY,
+                    service_name TEXT NOT NULL,
+                    service_url TEXT NOT NULL,
+                    service_type TEXT NOT NULL CHECK (service_type IN ('WMS', 'WFS')),
+                    layer_name TEXT NOT NULL,
+                    layer_title TEXT,
+                    layer_abstract TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(service_url, layer_name, service_type)
+                );
+            """)
+            
+            # 恢复数据
+            await conn.execute("""
+                INSERT INTO layer_resources 
+                SELECT * FROM layer_resources_backup;
+            """)
+            
+            # 删除临时表
+            await conn.execute("DROP TABLE layer_resources_backup;")
+            
+            logger.info("表结构迁移完成，已移除动态参数字段")
+            
+        except Exception as e:
+            logger.error(f"表结构迁移失败: {e}")
             raise
     
     async def execute_query(self, sql: str, params: tuple = ()) -> aiosqlite.Cursor:

@@ -1,71 +1,106 @@
 """WMS工具模块
 
-提供WMS相关的工具函数，统一使用Web服务器提供可视化
+基于资源驱动的WMS地图服务工具
+专注于WMS地图图像的生成和获取功能
 """
 
 import logging
+import json
 from typing import Dict, Any, Optional
 from fastmcp import FastMCP, Context
 from pydantic import Field
 from typing_extensions import Annotated
 
-from ..database import get_layer_repository, LayerResourceQuery
 from ..utils.ogc_parser import get_ogc_parser
-from ..services.web_server.server import get_web_server
 
 logger = logging.getLogger(__name__)
 
-# 创建WMS工具子服务器
-wms_server = FastMCP(name="WMS工具服务")
+# 创建WMS工具服务器
+wms_server = FastMCP(name="WMS地图工具")
 
 
 @wms_server.tool
-async def get_wms_map(
+async def get_wms_map_url(
     layer_name: Annotated[str, Field(description="WMS图层名称")],
     width: Annotated[int, Field(description="图像宽度", ge=100, le=2000)] = 800,
     height: Annotated[int, Field(description="图像高度", ge=100, le=2000)] = 600,
     bbox: Annotated[Optional[str], Field(description="边界框，格式：min_x,min_y,max_x,max_y")] = None,
     crs: Annotated[str, Field(description="坐标参考系统")] = "EPSG:4326",
     format: Annotated[str, Field(description="图像格式")] = "image/png",
+    styles: Annotated[Optional[str], Field(description="样式名称")] = None,
     ctx: Context = None
 ) -> Dict[str, Any]:
-    """获取WMS图层地图
+    """生成WMS地图图像URL
     
-    根据图层名称生成WMS GetMap请求URL，返回图层的预览链接。
+    通过资源获取图层信息，然后生成WMS GetMap请求URL。
+    
+    Args:
+        layer_name: WMS图层名称
+        width: 图像宽度
+        height: 图像高度
+        bbox: 边界框，格式：min_x,min_y,max_x,max_y
+        crs: 坐标参考系统
+        format: 图像格式
+        styles: 样式名称（注意：此参数仅用于接口兼容性，实际由parser自动处理）
+        ctx: MCP上下文对象
+        
+    Returns:
+        包含地图URL和相关信息的字典
     """
     if ctx:
-        await ctx.info(f"正在生成WMS图层地图: {layer_name}")
+        await ctx.info(f"正在生成WMS地图URL: {layer_name}")
     
     try:
-        # 获取图层资源信息
-        repository = await get_layer_repository()
-        query = LayerResourceQuery(layer_name=layer_name, service_type="WMS", limit=1)
-        layers = await repository.list_resources(query)
+        # 通过资源获取图层信息
+        layer_resource = await ctx.read_resource(f"ogc://layer/{layer_name}")
         
-        if not layers:
-            raise ValueError(f"未找到WMS图层: {layer_name}")
+        # 修复：处理不同的资源返回格式
+        layer_data = None
+        if isinstance(layer_resource, str):
+            # 直接是JSON字符串
+            layer_data = json.loads(layer_resource)
+        elif isinstance(layer_resource, list) and len(layer_resource) > 0:
+            # 是列表，取第一个元素
+            if hasattr(layer_resource[0], 'content'):
+                # 有content属性
+                layer_data = json.loads(layer_resource[0].content)
+            else:
+                # 直接是数据
+                layer_data = layer_resource[0]
+        elif isinstance(layer_resource, dict):
+            # 直接是字典
+            layer_data = layer_resource
+        else:
+            raise ValueError(f"未知的资源格式: {type(layer_resource)}")
         
-        layer = layers[0]
+        if not layer_data:
+            raise ValueError(f"无法解析图层资源: {layer_name}")
+        
+        if "error" in layer_data:
+            raise ValueError(f"图层资源错误: {layer_data['error']}")
+        
+        # 验证是否支持WMS
+        wms_params = layer_data["access_parameters"].get("wms")
+        if not wms_params:
+            raise ValueError(f"图层 {layer_name} 不支持WMS服务")
         
         # 解析边界框
-        bbox_coords = None
-        if bbox:
-            try:
-                coords = [float(x.strip()) for x in bbox.split(',')]
-                if len(coords) == 4:
-                    bbox_coords = tuple(coords)
-            except ValueError:
-                raise ValueError("边界框格式错误，应为：min_x,min_y,max_x,max_y")
+        bbox_coords = _parse_bbox(bbox) if bbox else None
         
         # 如果没有提供边界框，使用图层的默认边界框
-        if not bbox_coords and layer.bbox:
-            bbox_coords = (layer.bbox.min_x, layer.bbox.min_y, layer.bbox.max_x, layer.bbox.max_y)
+        if not bbox_coords:
+            bbox_info = layer_data["capabilities"]["bbox"]
+            if bbox_info and "wgs84" in bbox_info:
+                bbox_coords = tuple(bbox_info["wgs84"])
         
         # 生成GetMap URL
         parser = await get_ogc_parser()
+        basic_info = layer_data["basic_info"]
+        
+        # 修复：移除styles参数，因为parser方法不支持
         map_url = parser.get_wms_map_url(
-            base_url=layer.service_url,
-            layer_name=layer.layer_name,
+            base_url=basic_info["service_url"],
+            layer_name=wms_params["layers"],
             bbox=bbox_coords,
             width=width,
             height=height,
@@ -75,12 +110,10 @@ async def get_wms_map(
         
         result = {
             "layer_info": {
-                "resource_id": layer.resource_id,
-                "service_name": layer.service_name,
-                "service_url": layer.service_url,
-                "layer_name": layer.layer_name,
-                "layer_title": layer.layer_title,
-                "crs": layer.crs
+                "name": basic_info["layer_name"],
+                "title": basic_info["layer_title"],
+                "service_url": basic_info["service_url"],
+                "service_type": basic_info["service_type"]
             },
             "map_url": map_url,
             "parameters": {
@@ -88,7 +121,13 @@ async def get_wms_map(
                 "height": height,
                 "bbox": bbox_coords,
                 "crs": crs,
-                "format": format
+                "format": format,
+                "styles": styles or ""  # 记录用户请求的样式
+            },
+            "usage": {
+                "direct_access": f"直接访问地图图像: {map_url}",
+                "embed_html": f'<img src="{map_url}" alt="{basic_info["layer_title"]}" width="{width}" height="{height}">',
+                "description": "可以直接在浏览器中打开URL查看地图图像"
             }
         }
         
@@ -99,166 +138,22 @@ async def get_wms_map(
         return result
         
     except Exception as e:
-        error_msg = f"生成WMS地图失败: {e}"
+        error_msg = f"生成WMS地图URL失败: {e}"
         logger.error(error_msg)
         if ctx:
             await ctx.error(error_msg)
         raise
 
 
-@wms_server.tool
-async def create_wms_visualization(
-    layer_name: Annotated[str, Field(description="WMS图层名称")],
-    width: Annotated[int, Field(description="地图容器宽度", ge=300, le=2000)] = 1000,
-    height: Annotated[int, Field(description="地图容器高度", ge=300, le=2000)] = 700,
-    initial_zoom: Annotated[int, Field(description="初始缩放级别", ge=1, le=18)] = 10,
-    bbox: Annotated[Optional[str], Field(description="边界框，格式：min_x,min_y,max_x,max_y")] = None,
-    ctx: Context = None
-) -> Dict[str, Any]:
-    """创建WMS图层Web可视化
-    
-    在统一Web服务器中创建WMS图层的交互式地图可视化。
-    """
-    if ctx:
-        await ctx.info(f"正在创建WMS图层可视化: {layer_name}")
-    
+# 辅助函数
+
+def _parse_bbox(bbox_str: str) -> tuple:
+    """解析边界框字符串"""
     try:
-        # 获取图层信息
-        repository = await get_layer_repository()
-        query = LayerResourceQuery(layer_name=layer_name, service_type="WMS", limit=1)
-        layers = await repository.list_resources(query)
-        
-        if not layers:
-            raise ValueError(f"未找到WMS图层: {layer_name}")
-        
-        layer = layers[0]
-        
-        # 处理边界框
-        bbox_coords = None
-        if bbox:
-            try:
-                coords = [float(x.strip()) for x in bbox.split(',')]
-                if len(coords) == 4:
-                    bbox_coords = tuple(coords)
-            except ValueError:
-                raise ValueError("边界框格式错误，应为：min_x,min_y,max_x,max_y")
-        
-        # 如果没有提供边界框，使用图层的默认边界框
-        if not bbox_coords and layer.bbox:
-            bbox_coords = (layer.bbox.min_x, layer.bbox.min_y, layer.bbox.max_x, layer.bbox.max_y)
-        
-        # 计算地图中心点
-        center_lat, center_lng = 39.9042, 116.4074  # 默认北京
-        if bbox_coords:
-            center_lat = (bbox_coords[1] + bbox_coords[3]) / 2
-            center_lng = (bbox_coords[0] + bbox_coords[2]) / 2
-        
-        # 构建图层信息和地图配置
-        layer_info = {
-            "resource_id": layer.resource_id,
-            "service_name": layer.service_name,
-            "service_url": layer.service_url,
-            "layer_name": layer.layer_name,
-            "layer_title": layer.layer_title,
-            "crs": layer.crs
-        }
-        
-        map_config = {
-            "center": [center_lat, center_lng],
-            "zoom": initial_zoom,
-            "width": width,
-            "height": height,
-            "bbox": bbox_coords
-        }
-        
-        # 获取Web服务器并添加可视化
-        web_server = await get_web_server()
-        visualization_url = await web_server.add_wms_visualization(
-            layer_name, layer_info, map_config
-        )
-        
-        result = {
-            "visualization_info": {
-                "type": "wms",
-                "layer_name": layer_name,
-                "url": visualization_url,
-                "web_server": web_server._get_base_url()
-            },
-            "layer_info": layer_info,
-            "map_config": map_config,
-            "instructions": {
-                "access": f"在浏览器中访问: {visualization_url}",
-                "web_server": f"Web服务器首页: {web_server._get_base_url()}",
-                "features": [
-                    "WMS图层交互式地图",
-                    "缩放和平移操作",
-                    "图层控制和底图切换",
-                    "坐标显示和点击查询",
-                    "比例尺显示"
-                ]
-            }
-        }
-        
-        if ctx:
-            await ctx.info(f"WMS可视化创建成功，访问地址: {visualization_url}")
-        
-        logger.info(f"WMS可视化创建成功: {layer_name}，URL: {visualization_url}")
-        return result
-        
-    except Exception as e:
-        error_msg = f"创建WMS可视化失败: {e}"
-        logger.error(error_msg)
-        if ctx:
-            await ctx.error(error_msg)
-        raise
-
-
-@wms_server.tool
-async def get_web_server_status(ctx: Context = None) -> Dict[str, Any]:
-    """获取Web服务器状态
-    
-    返回统一Web可视化服务器的状态信息和可视化列表。
-    """
-    if ctx:
-        await ctx.info("正在获取Web服务器状态")
-    
-    try:
-        # 获取Web服务器
-        web_server = await get_web_server()
-        
-        # 获取服务器信息和可视化列表
-        server_info = web_server._get_server_info()
-        visualizations = web_server.list_visualizations()
-        
-        result = {
-            "server_status": server_info,
-            "visualizations": visualizations,
-            "access_info": {
-                "web_interface": server_info["base_url"],
-                "api_endpoint": f"{server_info['base_url']}/api/visualizations",
-                "total_visualizations": visualizations["total"]
-            },
-            "instructions": {
-                "web_access": f"在浏览器中访问: {server_info['base_url']}",
-                "api_access": f"API接口: {server_info['base_url']}/api/visualizations",
-                "features": [
-                    "统一的可视化管理界面",
-                    "WMS和GeoJSON地图展示",
-                    "可视化结果浏览和管理",
-                    "RESTful API接口"
-                ]
-            }
-        }
-        
-        if ctx:
-            await ctx.info(f"Web服务器运行正常，共有 {visualizations['total']} 个可视化")
-        
-        logger.info(f"Web服务器状态查询成功，可视化数量: {visualizations['total']}")
-        return result
-        
-    except Exception as e:
-        error_msg = f"获取Web服务器状态失败: {e}"
-        logger.error(error_msg)
-        if ctx:
-            await ctx.error(error_msg)
-        raise
+        coords = [float(x.strip()) for x in bbox_str.split(',')]
+        if len(coords) == 4:
+            return tuple(coords)
+        else:
+            raise ValueError("边界框必须包含4个坐标值")
+    except ValueError as e:
+        raise ValueError(f"边界框格式错误: {e}")

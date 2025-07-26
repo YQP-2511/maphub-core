@@ -53,7 +53,7 @@ class LayerResourceRepository:
         if existing:
             raise ValueError(f"图层资源已存在: {layer_data.service_url} - {layer_data.layer_name} ({layer_data.service_type})")
         
-        # 创建图层资源对象
+        # 创建图层资源对象（只包含基础元数据）
         now = datetime.now()
         layer_resource = LayerResource(
             resource_id=resource_id,
@@ -63,19 +63,17 @@ class LayerResourceRepository:
             layer_name=layer_data.layer_name,
             layer_title=layer_data.layer_title,
             layer_abstract=layer_data.layer_abstract,
-            crs=layer_data.crs,
-            bbox=layer_data.bbox,
             created_at=now,
             updated_at=now
         )
         
-        # 插入数据库
+        # 插入数据库（只包含基础元数据字段）
         insert_sql = """
         INSERT INTO layer_resources (
             resource_id, service_name, service_url, service_type,
-            layer_name, layer_title, layer_abstract, crs, bbox,
+            layer_name, layer_title, layer_abstract,
             created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         
         data_dict = layer_resource.to_dict()
@@ -87,8 +85,6 @@ class LayerResourceRepository:
             data_dict['layer_name'],
             data_dict['layer_title'],
             data_dict['layer_abstract'],
-            data_dict['crs'],
-            data_dict['bbox'],
             data_dict['created_at'],
             data_dict['updated_at']
         )
@@ -236,17 +232,16 @@ class LayerResourceRepository:
         if not existing:
             return None
         
-        # 构建更新字段
+        # 构建更新字段（只包含基础元数据字段）
         update_fields = []
         params = []
         
         for field, value in update_data.dict(exclude_unset=True).items():
-            if field == 'bbox' and value:
-                update_fields.append("bbox = ?")
-                params.append(value.to_dict() if hasattr(value, 'to_dict') else value)
-            else:
-                update_fields.append(f"{field} = ?")
-                params.append(value)
+            # 跳过动态参数字段
+            if field in ['crs', 'bbox']:
+                continue
+            update_fields.append(f"{field} = ?")
+            params.append(value)
         
         if not update_fields:
             return existing

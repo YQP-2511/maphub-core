@@ -1,9 +1,8 @@
-"""OGC MCP服务模块
+"""
+OGC MCP服务器主模块
 
-基于FastMCP框架提供OGC服务资源访问的MCP服务器，
-支持WMS和WFS图层的动态注册、资源管理和空间数据访问功能
-
-采用模块化设计，使用FastMCP的服务器组合功能将不同功能分离到子服务器中
+使用FastMCP框架构建的OGC服务MCP服务器，提供WMS/WFS服务的管理和访问功能。
+支持服务器组合模式，将多个子服务器组合成一个完整的服务。
 """
 
 import logging
@@ -22,7 +21,7 @@ from .tools.management_tools import management_server
 from .tools.wms_tools import wms_server  
 from .tools.wfs_tools import wfs_server
 from .tools.visualization_tools import visualization_server
-from .resources.layer_resources import layer_resource_server
+from .resources.layer_registry import layer_registry_server
 from .prompts.workflow_prompts import workflow_prompts_server
 
 # 配置日志
@@ -83,7 +82,7 @@ async def graceful_shutdown():
         
         # 关闭OGC解析器
         logger.info("正在关闭OGC解析器...")
-        parser = await get_ogc_parser()
+        parser = get_ogc_parser()
         await parser.close()
         logger.info("OGC解析器已关闭")
         
@@ -140,7 +139,7 @@ async def lifespan(app):
                 await app.import_server(wfs_server, prefix="wfs")               # WFS工具
                 await app.import_server(visualization_server, prefix="viz")     # 通用可视化工具
                 await app.import_server(workflow_prompts_server, prefix="workflow")  # 工作流提示词
-                await app.import_server(layer_resource_server)                  # 图层资源（无前缀）
+                await app.import_server(layer_registry_server)                 # 图层注册表资源（无前缀）
                 
                 _servers_imported = True
                 
@@ -151,7 +150,7 @@ async def lifespan(app):
                 logger.info("- WFS工具 (wfs_*)")
                 logger.info("- 通用可视化工具 (viz_*)")
                 logger.info("- 工作流提示词 (workflow_*)")
-                logger.info("- 图层资源")
+                logger.info("- 图层注册表资源 (ogc://)")
                 
             except Exception as e:
                 logger.error(f"导入子服务器失败: {e}")

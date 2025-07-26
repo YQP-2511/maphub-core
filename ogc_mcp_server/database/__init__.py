@@ -8,8 +8,7 @@ from .models import (
     LayerResource,
     LayerResourceCreate,
     LayerResourceUpdate,
-    LayerResourceQuery,
-    BoundingBox
+    LayerResourceQuery
 )
 from .connection import (
     DatabaseManager,
@@ -29,7 +28,6 @@ __all__ = [
     'LayerResourceCreate', 
     'LayerResourceUpdate',
     'LayerResourceQuery',
-    'BoundingBox',
     
     # 数据库连接
     'DatabaseManager',
