@@ -6,14 +6,10 @@ OGC MCP服务器主模块
 """
 
 import logging
-import signal
-import sys
-import asyncio
 from contextlib import asynccontextmanager
 from fastmcp import FastMCP
 
 from .database import init_database, close_database
-from .utils.ogc_parser import get_ogc_parser
 from .services.web_server.server import get_web_server, stop_web_server
 
 # 导入子服务器模块
@@ -27,90 +23,42 @@ from .prompts.workflow_prompts import workflow_prompts_server
 # 配置日志
 logger = logging.getLogger(__name__)
 
-# 全局标志，防止重复导入
+# 全局标志，防止重复导入和重复清理
 _servers_imported = False
-_shutdown_in_progress = False
+_cleanup_done = False
 
 
-def setup_signal_handlers():
-    """设置信号处理器，确保优雅退出"""
-    def signal_handler(signum, frame):
-        """信号处理函数"""
-        global _shutdown_in_progress
-        
-        if _shutdown_in_progress:
-            logger.warning("强制退出信号已接收，正在退出...")
-            sys.exit(1)
-        
-        _shutdown_in_progress = True
-        signal_name = "SIGINT" if signum == signal.SIGINT else f"信号{signum}"
-        logger.info(f"接收到{signal_name}信号，正在优雅关闭服务器...")
-        
-        # 创建异步任务来处理关闭
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # 如果事件循环正在运行，创建任务
-                loop.create_task(graceful_shutdown())
-            else:
-                # 如果事件循环未运行，直接运行
-                asyncio.run(graceful_shutdown())
-        except Exception as e:
-            logger.error(f"优雅关闭失败: {e}")
-            sys.exit(1)
+async def cleanup_resources():
+    """清理资源"""
+    global _cleanup_done
     
-    # 注册信号处理器
-    signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
-    if hasattr(signal, 'SIGTERM'):
-        signal.signal(signal.SIGTERM, signal_handler)  # 终止信号
-
-
-async def graceful_shutdown():
-    """优雅关闭所有服务"""
-    logger.info("开始优雅关闭流程...")
+    if _cleanup_done:
+        logger.info("资源已清理，跳过重复清理")
+        return
+    
+    logger.info("正在清理资源...")
     
     try:
         # 停止Web可视化服务器
         logger.info("正在停止Web可视化服务器...")
         await stop_web_server()
-        logger.info("Web可视化服务器已停止")
         
         # 关闭数据库连接
         logger.info("正在关闭数据库连接...")
         await close_database()
         logger.info("数据库连接已关闭")
         
-        # 关闭OGC解析器
-        logger.info("正在关闭OGC解析器...")
-        parser = get_ogc_parser()
-        await parser.close()
-        logger.info("OGC解析器已关闭")
-        
-        logger.info("所有服务已优雅关闭")
+        _cleanup_done = True
+        logger.info("资源清理完成")
         
     except Exception as e:
-        logger.error(f"优雅关闭过程中出现错误: {e}")
-    finally:
-        # 重置全局状态
-        global _shutdown_in_progress, _servers_imported
-        _shutdown_in_progress = False
-        _servers_imported = False
-        
-        logger.info("服务器已关闭")
-        
-        # 不再使用 sys.exit(0)，让程序自然退出
-        # 这样可以避免 SystemExit 异常和相关的错误信息
-        logger.info("退出程序")
-        sys.exit(0)
+        logger.error(f"资源清理过程中出现错误: {e}")
 
 
 @asynccontextmanager
 async def lifespan(app):
     """服务器生命周期管理"""
     global _servers_imported
-    
-    # 设置信号处理器
-    setup_signal_handlers()
     
     # 启动时的初始化操作
     logger.info("正在初始化OGC MCP服务器...")
@@ -170,31 +118,15 @@ async def lifespan(app):
         raise
     finally:
         # 关闭时的清理操作
-        if not _shutdown_in_progress:
-            logger.info("正在关闭OGC MCP服务器...")
-            await graceful_shutdown()
+        logger.info("正在关闭OGC MCP服务器...")
+        await cleanup_resources()
 
 
-def create_ogc_mcp_server() -> FastMCP:
-    """创建OGC MCP服务器
-    
-    使用FastMCP的服务器组合功能，将各个子服务器组合成一个完整的服务。
-    子服务器的组合在 lifespan 函数中异步进行。
-    
-    Returns:
-        FastMCP服务器实例
-    """
-    # 创建主服务器实例，子服务器组合将在启动时进行
-    main_server = FastMCP(name="OGC服务", lifespan=lifespan)
-    
-    logger.info("OGC MCP服务器实例创建完成")
-    logger.info("子服务器将在启动时进行组合")
-    
-    return main_server
+# 创建单一的OGC MCP服务器实例（遵循FastMCP最佳实践）
+mcp = FastMCP(name="OGC服务", lifespan=lifespan)
 
-
-# 创建OGC MCP服务器实例
-mcp = create_ogc_mcp_server()
+logger.info("OGC MCP服务器实例创建完成")
+logger.info("子服务器将在启动时进行组合")
 
 
 def get_ogc_mcp_server() -> FastMCP:

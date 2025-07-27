@@ -171,37 +171,15 @@ class WebVisualizationServer:
             # 设置关闭事件
             self._shutdown_event.set()
             
-            # 强制关闭HTTP服务器
+            # 快速关闭HTTP服务器，不等待
             if self.server:
                 logger.info("正在强制关闭HTTP服务器...")
-                
-                # 在单独线程中执行关闭操作，避免阻塞
-                def force_shutdown():
-                    try:
-                        self.server.shutdown()
-                        self.server.server_close()
-                        logger.info("HTTP服务器已强制关闭")
-                    except Exception as e:
-                        logger.warning(f"强制关闭HTTP服务器时出现异常: {e}")
-                
-                # 启动关闭线程
-                shutdown_thread = threading.Thread(target=force_shutdown, daemon=True)
-                shutdown_thread.start()
-                
-                # 等待关闭完成，但不超过2秒
-                shutdown_thread.join(timeout=2)
-                if shutdown_thread.is_alive():
-                    logger.warning("HTTP服务器关闭超时，继续执行")
-            
-            # 强制结束服务器线程
-            if self.server_thread and self.server_thread.is_alive():
-                logger.info("正在强制结束服务器线程...")
-                # 减少等待时间到3秒
-                self.server_thread.join(timeout=3)
-                if self.server_thread.is_alive():
-                    logger.warning("服务器线程强制结束超时")
-                else:
-                    logger.info("服务器线程已结束")
+                try:
+                    self.server.shutdown()
+                    self.server.server_close()
+                    logger.info("HTTP服务器已强制关闭")
+                except Exception as e:
+                    logger.warning(f"强制关闭HTTP服务器时出现异常: {e}")
             
             self.is_running = False
             
@@ -692,7 +670,6 @@ async def stop_web_server():
     
     if _web_server_instance:
         _web_server_instance.stop()
-        # 等待一小段时间确保清理完成
-        await asyncio.sleep(0.5)
+        # 移除异步等待，避免阻塞ASGI响应
         _web_server_instance = None
         logger.info("Web服务器实例已清理")
