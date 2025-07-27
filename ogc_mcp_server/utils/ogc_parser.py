@@ -78,6 +78,20 @@ class OGCServiceParser:
         
         return url
     
+    def _clean_base_url(self, url: str) -> str:
+        """清理基础URL，移除查询参数
+        
+        Args:
+            url: 原始URL
+            
+        Returns:
+            清理后的基础URL
+        """
+        parsed = urlparse(url)
+        # 只保留scheme, netloc, path，移除query和fragment
+        clean_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', '', ''))
+        return clean_url.rstrip('/')
+    
     async def _find_working_endpoint(self, base_url: str, service_type: str) -> Optional[str]:
         """查找可用的OGC服务端点
         
@@ -88,16 +102,16 @@ class OGCServiceParser:
         Returns:
             可用的完整服务URL，如果没有找到则返回None
         """
-        # 确保base_url不以/结尾
-        base_url = base_url.rstrip('/')
+        # 清理基础URL，移除可能存在的查询参数
+        clean_base_url = self._clean_base_url(base_url)
         
         for endpoint in self.COMMON_OGC_ENDPOINTS:
             try:
                 # 构建完整的服务URL
                 if endpoint:
-                    test_url = base_url + endpoint
+                    test_url = clean_base_url + endpoint
                 else:
-                    test_url = base_url
+                    test_url = clean_base_url
                 
                 # 标准化URL（添加GetCapabilities参数）
                 normalized_url = self._normalize_service_url(test_url, service_type)
@@ -118,7 +132,7 @@ class OGCServiceParser:
                 logger.debug(f"端点测试失败 {test_url}: {e}")
                 continue
         
-        logger.warning(f"未找到可用的{service_type}端点: {base_url}")
+        logger.warning(f"未找到可用的{service_type}端点: {clean_base_url}")
         return None
     
     async def test_service_availability(self, url: str) -> bool:
@@ -522,7 +536,7 @@ class OGCServiceParser:
         
         Args:
             service_url: 服务URL
-            service_type: 服务类型（WMS/WFS）
+            service_type: 服务类型（WMS/WFS/BOTH）
             layer_name: 图层名称
             
         Returns:
@@ -538,6 +552,26 @@ class OGCServiceParser:
                 return await self._get_wms_layer_details(service_url, layer_name)
             elif service_type == 'WFS':
                 return await self._get_wfs_layer_details(service_url, layer_name)
+            elif service_type == 'BOTH':
+                # 对于BOTH类型，优先尝试WMS，失败则尝试WFS
+                try:
+                    logger.debug(f"尝试作为WMS获取图层详细信息: {layer_name}")
+                    wms_details = await self._get_wms_layer_details(service_url, layer_name)
+                    # 标记为BOTH类型，但包含WMS详细信息
+                    wms_details["service_type"] = "BOTH"
+                    wms_details["primary_service"] = "WMS"
+                    return wms_details
+                except Exception as wms_error:
+                    logger.debug(f"WMS获取失败，尝试WFS: {wms_error}")
+                    try:
+                        wfs_details = await self._get_wfs_layer_details(service_url, layer_name)
+                        # 标记为BOTH类型，但包含WFS详细信息
+                        wfs_details["service_type"] = "BOTH"
+                        wfs_details["primary_service"] = "WFS"
+                        return wfs_details
+                    except Exception as wfs_error:
+                        logger.error(f"WMS和WFS都获取失败: WMS={wms_error}, WFS={wfs_error}")
+                        raise ValueError(f"无法从WMS或WFS获取图层详细信息: {layer_name}")
             else:
                 raise ValueError(f"不支持的服务类型: {service_type}")
                 

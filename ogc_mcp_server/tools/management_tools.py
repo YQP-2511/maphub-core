@@ -81,19 +81,23 @@ async def list_layers_from_resource(
     
     try:
         # 通过资源获取图层列表
-        layers_resource = await ctx.read_resource("ogc://layers")
+        layers_resource_result = await ctx.read_resource("ogc://layers")
         
-        # 修复：检查返回的数据类型并正确处理
-        if isinstance(layers_resource, dict):
-            layers_data = layers_resource
-        elif isinstance(layers_resource, str):
-            layers_data = json.loads(layers_resource)
-        elif isinstance(layers_resource, list):
-            # 如果直接返回列表，构建标准格式
-            layers_data = {"layers": layers_resource, "total": len(layers_resource)}
+        # 修复：正确处理资源返回的数据结构
+        if not layers_resource_result or not layers_resource_result[0].content:
+            raise ValueError("无法获取图层列表资源")
+        
+        layers_content = layers_resource_result[0].content
+        
+        # 如果content是字符串，需要解析为JSON
+        if isinstance(layers_content, str):
+            layers_data = json.loads(layers_content)
         else:
-            # 其他情况，尝试转换为字符串再解析
-            layers_data = json.loads(str(layers_resource))
+            layers_data = layers_content
+        
+        # 检查是否包含错误信息
+        if isinstance(layers_data, dict) and "error" in layers_data:
+            raise ValueError(f"图层资源错误: {layers_data['error']}")
         
         # 应用筛选条件
         filtered_layers = layers_data.get("layers", [])

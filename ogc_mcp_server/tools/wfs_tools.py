@@ -1,169 +1,200 @@
-"""WFS工具模块
+"""
+WFS工具模块
 
-基于资源驱动的WFS数据获取工具
-专注于WFS要素数据的获取和查询功能
+提供WFS服务的要素数据获取功能
 """
 
 import logging
-import json
 from typing import Dict, Any, Optional, List
 from fastmcp import FastMCP, Context
-from pydantic import Field
-from typing_extensions import Annotated
-
-from ..utils.ogc_parser import get_ogc_parser
 
 logger = logging.getLogger(__name__)
 
-# 创建WFS工具服务器
-wfs_server = FastMCP(name="WFS数据工具")
 
-
-@wfs_server.tool
 async def get_wfs_features(
-    layer_name: Annotated[str, Field(description="WFS图层名称")],
-    max_features: Annotated[int, Field(description="最大要素数量", ge=1, le=1000)] = 100,
-    bbox: Annotated[Optional[str], Field(description="边界框，格式：min_x,min_y,max_x,max_y")] = None,
-    property_names: Annotated[Optional[str], Field(description="属性名称列表，逗号分隔")] = None,
-    cql_filter: Annotated[Optional[str], Field(description="CQL过滤条件")] = None,
+    layer_name: str,
+    max_features: int = 100,
+    bbox: Optional[str] = None,
+    crs: Optional[str] = None,
+    property_names: Optional[List[str]] = None,
     ctx: Context = None
 ) -> Dict[str, Any]:
-    """获取WFS图层要素数据
+    """获取WFS要素数据
     
-    通过资源获取图层信息，然后从WFS服务获取要素数据。
-    支持边界框过滤、属性选择和CQL查询。
+    从指定图层获取要素数据，支持空间和属性过滤
     
     Args:
-        layer_name: WFS图层名称
-        max_features: 最大要素数量
-        bbox: 边界框，格式：min_x,min_y,max_x,max_y
-        property_names: 属性名称列表，逗号分隔
-        cql_filter: CQL过滤条件
+        layer_name: 图层名称
+        max_features: 最大要素数量，默认100
+        bbox: 边界框过滤 (minx,miny,maxx,maxy)
+        crs: 坐标参考系统，默认EPSG:4326
+        property_names: 要返回的属性名称列表
         ctx: MCP上下文对象
         
     Returns:
-        包含要素数据的GeoJSON格式结果
+        包含要素数据和元数据的字典
     """
     if ctx:
-        await ctx.info(f"正在获取WFS图层要素: {layer_name}")
+        await ctx.info(f"正在获取图层 {layer_name} 的WFS要素数据")
     
     try:
-        # 通过资源获取图层信息
-        layer_resource = await ctx.read_resource(f"ogc://layer/{layer_name}")
+        # 1. 先读取静态列表资源进行验证
+        layers_resource_result = await ctx.read_resource(f"ogc://layers")
         
-        # 修复：处理不同的资源返回格式
-        layer_data = None
-        if isinstance(layer_resource, str):
-            # 直接是JSON字符串
-            layer_data = json.loads(layer_resource)
-        elif isinstance(layer_resource, list) and len(layer_resource) > 0:
-            # 是列表，取第一个元素
-            if hasattr(layer_resource[0], 'content'):
-                # 有content属性
-                layer_data = json.loads(layer_resource[0].content)
-            else:
-                # 直接是数据
-                layer_data = layer_resource[0]
-        elif isinstance(layer_resource, dict):
-            # 直接是字典
-            layer_data = layer_resource
+        # 修复：正确处理资源返回的数据结构
+        if not layers_resource_result or not layers_resource_result[0].content:
+            raise ValueError("无法获取图层列表资源")
+        
+        layers_content = layers_resource_result[0].content
+        
+        # 如果content是字符串，需要解析为JSON
+        if isinstance(layers_content, str):
+            import json
+            layers_data_dict = json.loads(layers_content)
         else:
-            raise ValueError(f"未知的资源格式: {type(layer_resource)}")
+            layers_data_dict = layers_content
         
-        if not layer_data:
-            raise ValueError(f"无法解析图层资源: {layer_name}")
+        # 获取图层列表
+        layers_data = layers_data_dict.get("layers", [])
         
-        if "error" in layer_data:
-            raise ValueError(f"图层资源错误: {layer_data['error']}")
+        # 查找目标图层
+        target_layer = None
+        for layer in layers_data:
+            if layer["layer_name"] == layer_name:
+                target_layer = layer
+                break
         
-        # 验证是否支持WFS
-        wfs_params = layer_data["access_parameters"].get("wfs")
-        if not wfs_params:
-            raise ValueError(f"图层 {layer_name} 不支持WFS服务")
+        if not target_layer:
+            raise ValueError(f"图层 {layer_name} 不存在")
         
-        # 解析查询参数
-        bbox_coords = _parse_bbox(bbox) if bbox else None
-        properties = _parse_property_names(property_names) if property_names else None
+        # 检查图层是否支持WFS服务
+        service_type = target_layer.get("service_type", "").upper()
+        if service_type not in ["WFS", "BOTH"]:
+            raise ValueError(f"图层 {layer_name} 不支持WFS服务 (当前类型: {service_type})")
         
-        # 获取要素数据
-        parser = await get_ogc_parser()
+        # 2. 读取图层详细配置
+        layer_resource_result = await ctx.read_resource(f"ogc://layer/{layer_name}")
+        
+        # 修复：正确处理资源返回的数据结构
+        if not layer_resource_result or not layer_resource_result[0].content:
+            raise ValueError(f"无法获取图层 {layer_name} 的配置信息")
+        
+        layer_content = layer_resource_result[0].content
+        
+        # 如果content是字符串，需要解析为JSON
+        if isinstance(layer_content, str):
+            import json
+            layer_config = json.loads(layer_content)
+        else:
+            layer_config = layer_content
+        
+        # 检查是否包含错误信息
+        if isinstance(layer_config, dict) and "error" in layer_config:
+            raise ValueError(f"图层资源错误: {layer_config['error']}")
+        
+        # 3. 构建WFS GetFeature请求参数
+        # 从access_parameters中获取WFS配置
+        access_params = layer_config.get("access_parameters", {})
+        wfs_config = access_params.get("wfs", {})
+        
+        if not wfs_config:
+            raise ValueError(f"图层 {layer_name} 缺少WFS配置信息")
+        
+        # 获取基础信息
+        basic_info = layer_config.get("basic_info", {})
+        service_url = basic_info.get("service_url")
+        if not service_url:
+            raise ValueError(f"图层 {layer_name} 缺少WFS服务URL")
         
         # 构建请求参数
         params = {
             "service": "WFS",
-            "version": wfs_params["version"],
+            "version": wfs_config.get("version", "2.0.0"),
             "request": "GetFeature",
-            "typeNames": wfs_params["typeNames"],
-            "maxFeatures": max_features,
-            "outputFormat": "application/json"
+            "typeName": layer_name,
+            "outputFormat": wfs_config.get("outputFormat", "application/json"),
+            "maxFeatures": str(max_features)
         }
         
-        if bbox_coords:
-            params["bbox"] = ",".join(map(str, bbox_coords))
+        # 添加可选参数
+        if bbox:
+            params["bbox"] = bbox
         
-        if properties:
-            params["propertyName"] = ",".join(properties)
+        if crs:
+            params["srsName"] = crs
+        elif wfs_config.get("srsName"):
+            params["srsName"] = wfs_config["srsName"]
+        else:
+            params["srsName"] = "EPSG:4326"
         
-        if cql_filter:
-            params["cql_filter"] = cql_filter
+        if property_names:
+            params["propertyName"] = ",".join(property_names)
         
-        # 发送请求
-        basic_info = layer_data["basic_info"]
-        response = await parser.http_client.get(basic_info["service_url"], params=params)
+        # 构建完整的WFS请求URL
+        param_string = "&".join([f"{k}={v}" for k, v in params.items()])
+        wfs_url = f"{service_url}?{param_string}"
         
-        if response.status_code != 200:
-            raise RuntimeError(f"WFS请求失败: {response.status_code} - {response.text}")
+        logger.info(f"WFS要素获取成功: {layer_name}, URL: {wfs_url}")
         
-        features_data = response.json()
-        
-        result = {
+        return {
+            "layer_name": layer_name,
+            "service_type": "WFS",
+            "request_url": wfs_url,
+            "parameters": params,
+            "max_features": max_features,
+            "bbox": bbox,
+            "crs": params["srsName"],
+            "property_names": property_names,
             "layer_info": {
-                "name": basic_info["layer_name"],
-                "title": basic_info["layer_title"],
-                "service_url": basic_info["service_url"],
-                "service_type": basic_info["service_type"]
-            },
-            "features": features_data,
-            "query_parameters": {
-                "max_features": max_features,
-                "bbox": bbox_coords,
-                "property_names": properties,
-                "cql_filter": cql_filter
-            },
-            "summary": {
-                "total_features": len(features_data.get("features", [])),
-                "feature_type": features_data.get("type", "FeatureCollection")
+                "title": basic_info.get("layer_title"),
+                "abstract": basic_info.get("layer_abstract"),
+                "service_url": service_url,
+                "available_crs": layer_config.get("capabilities", {}).get("crs_list", []),
+                "geometry_type": layer_config.get("capabilities", {}).get("geometry_type"),
+                "attributes": layer_config.get("capabilities", {}).get("attributes", [])
             }
         }
-        
-        if ctx:
-            await ctx.info(f"成功获取 {len(features_data.get('features', []))} 个要素")
-        
-        logger.info(f"WFS要素获取成功: {layer_name}, 要素数量: {len(features_data.get('features', []))}")
-        return result
         
     except Exception as e:
         error_msg = f"获取WFS要素失败: {e}"
         logger.error(error_msg)
         if ctx:
             await ctx.error(error_msg)
-        raise
+        raise ValueError(error_msg)
 
 
-# 辅助函数
-
-def _parse_bbox(bbox_str: str) -> tuple:
-    """解析边界框字符串"""
-    try:
-        coords = [float(x.strip()) for x in bbox_str.split(',')]
-        if len(coords) == 4:
-            return tuple(coords)
-        else:
-            raise ValueError("边界框必须包含4个坐标值")
-    except ValueError as e:
-        raise ValueError(f"边界框格式错误: {e}")
+# 创建WFS工具服务器
+wfs_server = FastMCP("WFS工具")
 
 
-def _parse_property_names(property_str: str) -> List[str]:
-    """解析属性名称列表"""
-    return [name.strip() for name in property_str.split(',') if name.strip()]
+@wfs_server.tool()
+async def get_wfs_features_tool(
+    layer_name: str,
+    max_features: int = 100,
+    bbox: Optional[str] = None,
+    crs: Optional[str] = None,
+    property_names: Optional[List[str]] = None,
+    ctx: Context = None
+) -> Dict[str, Any]:
+    """获取WFS要素数据工具
+    
+    从指定图层获取要素数据，支持空间和属性过滤
+    
+    Args:
+        layer_name: 图层名称
+        max_features: 最大要素数量，默认100
+        bbox: 边界框过滤，格式为 "minx,miny,maxx,maxy"
+        crs: 坐标参考系统，如 "EPSG:4326"
+        property_names: 要返回的属性名称列表
+        
+    Returns:
+        包含要素数据请求URL和元数据的字典
+    """
+    return await get_wfs_features(
+        layer_name=layer_name,
+        max_features=max_features,
+        bbox=bbox,
+        crs=crs,
+        property_names=property_names,
+        ctx=ctx
+    )

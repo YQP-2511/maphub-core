@@ -19,7 +19,7 @@ class LayerResource(BaseModel):
     resource_id: str = Field(..., description="唯一标识符")
     service_name: str = Field(..., description="服务名称")
     service_url: str = Field(..., description="服务URL")
-    service_type: str = Field(..., description="服务类型(WMS/WFS)")
+    service_type: str = Field(..., description="服务类型(WMS/WFS/BOTH)")
     layer_name: str = Field(..., description="图层名称")
     layer_title: Optional[str] = Field(None, description="图层标题")
     layer_abstract: Optional[str] = Field(None, description="图层描述")
@@ -30,7 +30,7 @@ class LayerResource(BaseModel):
     @classmethod
     def validate_service_type(cls, v):
         """验证服务类型"""
-        allowed_types = ['WMS', 'WFS']
+        allowed_types = ['WMS', 'WFS', 'BOTH']
         if v.upper() not in allowed_types:
             raise ValueError(f'服务类型必须是 {allowed_types} 之一')
         return v.upper()
@@ -76,7 +76,7 @@ class LayerResourceCreate(BaseModel):
     """
     service_name: str = Field(..., description="服务名称")
     service_url: str = Field(..., description="服务URL")
-    service_type: str = Field(..., description="服务类型(WMS/WFS)")
+    service_type: str = Field(..., description="服务类型(WMS/WFS/BOTH)")
     layer_name: str = Field(..., description="图层名称")
     layer_title: Optional[str] = Field(None, description="图层标题")
     layer_abstract: Optional[str] = Field(None, description="图层描述")
@@ -85,7 +85,7 @@ class LayerResourceCreate(BaseModel):
     @classmethod
     def validate_service_type(cls, v):
         """验证服务类型"""
-        allowed_types = ['WMS', 'WFS']
+        allowed_types = ['WMS', 'WFS', 'BOTH']
         if v.upper() not in allowed_types:
             raise ValueError(f'服务类型必须是 {allowed_types} 之一')
         return v.upper()
@@ -106,7 +106,7 @@ class LayerResourceUpdate(BaseModel):
     """
     service_name: Optional[str] = Field(None, description="服务名称")
     service_url: Optional[str] = Field(None, description="服务URL")
-    service_type: Optional[str] = Field(None, description="服务类型(WMS/WFS)")
+    service_type: Optional[str] = Field(None, description="服务类型(WMS/WFS/BOTH)")
     layer_name: Optional[str] = Field(None, description="图层名称")
     layer_title: Optional[str] = Field(None, description="图层标题")
     layer_abstract: Optional[str] = Field(None, description="图层描述")
@@ -116,7 +116,7 @@ class LayerResourceUpdate(BaseModel):
     def validate_service_type(cls, v):
         """验证服务类型"""
         if v is not None:
-            allowed_types = ['WMS', 'WFS']
+            allowed_types = ['WMS', 'WFS', 'BOTH']
             if v.upper() not in allowed_types:
                 raise ValueError(f'服务类型必须是 {allowed_types} 之一')
             return v.upper()
@@ -145,7 +145,7 @@ class LayerResourceQuery(BaseModel):
     def validate_service_type(cls, v):
         """验证服务类型"""
         if v is not None:
-            allowed_types = ['WMS', 'WFS']
+            allowed_types = ['WMS', 'WFS', 'BOTH']
             if v.upper() not in allowed_types:
                 raise ValueError(f'服务类型必须是 {allowed_types} 之一')
             return v.upper()

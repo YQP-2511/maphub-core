@@ -122,7 +122,7 @@ async def lifespan(app):
         
         # 启动统一Web可视化服务器
         try:
-            web_server = await get_web_server(port=8080)
+            web_server = await get_web_server()
             logger.info(f"统一Web可视化服务器启动成功: {web_server._get_base_url()}")
         except Exception as e:
             logger.error(f"启动Web可视化服务器失败: {e}")

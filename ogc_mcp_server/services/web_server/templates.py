@@ -577,7 +577,6 @@ class WebTemplates:
                     layers: '{layer["layer_name"]}',
                     format: 'image/png',
                     transparent: true,
-                    crs: L.CRS.EPSG4326,
                     opacity: {layer.get("opacity", 0.8)}
                 }});
                 

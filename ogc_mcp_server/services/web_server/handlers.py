@@ -549,27 +549,66 @@ class CompositeHandler:
         
         if layer_type == "wms":
             return self._process_wms_layer(layer_config)
+        elif layer_type == "wfs":
+            # WFS图层包含GeoJSON数据，按GeoJSON方式处理
+            return self._process_wfs_layer(layer_config)
         elif layer_type == "geojson":
             return self._process_geojson_layer(layer_config)
         else:
             raise ValueError(f"不支持的图层类型: {layer_type}")
-    
+
     def _process_wms_layer(self, layer_config: Dict[str, Any]) -> Dict[str, Any]:
-        """处理WMS图层配置"""
+        """处理WMS图层配置
+        
+        Args:
+            layer_config: WMS图层配置
+            
+        Returns:
+            处理后的WMS图层数据
+        """
         layer_info = layer_config.get("layer_info", {})
-        map_config = layer_config.get("map_config", {})
+        style = layer_config.get("style", {})
         
         return {
             "type": "wms",
             "name": layer_info.get("layer_name", "WMS图层"),
-            "title": layer_info.get("layer_title", ""),
+            "title": layer_config.get("title", layer_info.get("layer_title", "")),
             "service_url": layer_info.get("service_url", ""),
             "layer_name": layer_info.get("layer_name", ""),
-            "crs": layer_info.get("crs", "EPSG:4326"),
-            "bbox": map_config.get("bbox"),
+            "format": layer_config.get("format", "image/png"),
+            "transparent": layer_config.get("transparent", True),
             "opacity": layer_config.get("opacity", 0.8),
             "visible": layer_config.get("visible", True),
+            "crs": layer_info.get("crs", "EPSG:4326"),
+            "bbox": layer_info.get("bbox"),
+            "style": style,
             "layer_info": layer_info
+        }
+
+    def _process_wfs_layer(self, layer_config: Dict[str, Any]) -> Dict[str, Any]:
+        """处理WFS图层配置
+        
+        WFS图层包含GeoJSON数据，按GeoJSON方式处理但保留WFS标识
+        """
+        layer_info = layer_config.get("layer_info", {})
+        geojson_data = layer_config.get("geojson_data", {})
+        style = layer_config.get("style", {})
+        
+        # 使用GeoJSONHandler的默认样式
+        default_style = self.geojson_handler._get_default_style()
+        default_style.update(style)
+        
+        return {
+            "type": "geojson",  # 在前端按GeoJSON处理
+            "source_type": "wfs",  # 保留原始类型标识
+            "name": layer_info.get("layer_name", "WFS图层"),
+            "title": layer_config.get("title", layer_info.get("layer_title", "")),
+            "geojson_data": geojson_data,
+            "style": default_style,
+            "opacity": layer_config.get("opacity", 0.8),
+            "visible": layer_config.get("visible", True),
+            "layer_info": layer_info,
+            "feature_count": len(geojson_data.get("features", []))
         }
     
     def _process_geojson_layer(self, layer_config: Dict[str, Any]) -> Dict[str, Any]:
