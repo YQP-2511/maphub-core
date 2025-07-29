@@ -9,7 +9,7 @@ from typing import List, Dict, Any, Optional
 from fastmcp import Context
 
 from ..database import get_layer_repository, LayerResourceCreate, LayerResourceUpdate
-from ..utils import get_ogc_parser
+from .ogc_parser import get_ogc_parser
 
 logger = logging.getLogger(__name__)
 

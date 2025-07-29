@@ -15,6 +15,7 @@ from fastmcp import FastMCP,Context
 from ..database.connection import DatabaseManager
 from ..database.repository import LayerResourceRepository
 from ..database.models import LayerResourceQuery
+from ..services.ogc_parser import get_ogc_parser
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -101,7 +102,6 @@ async def layer_detail(ctx: Context, layer_name: str) -> str:
         
         # 使用ogc_parser动态获取图层详细信息
         try:
-            from ..utils.ogc_parser import get_ogc_parser
             parser = await get_ogc_parser()
             
             # 动态获取OGC标准参数
@@ -158,10 +158,24 @@ async def layer_detail(ctx: Context, layer_name: str) -> str:
                     "geometry_type": ogc_details.get('geometry_type'),
                     "attributes": ogc_details.get('attributes', [])
                 },
+                # 新增：增强的详细信息部分
+                "enhanced_details": {
+                    "feature_schema": ogc_details.get('feature_schema'),  # WFS DescribeFeatureType 信息
+                    "dynamic_bbox": ogc_details.get('dynamic_bbox'),      # 动态边界框信息
+                    "styles_detailed": ogc_details.get('styles', []),     # 详细样式信息
+                    "wms_specific": {
+                        "opaque": ogc_details.get('opaque', False),
+                        "cascaded": ogc_details.get('cascaded', 0)
+                    } if target_layer['service_type'].upper() in ['WMS', 'BOTH'] else None
+                },
                 "metadata": {
-                    "source": "dynamic_ogc_capabilities",
+                    "source": "dynamic_ogc_capabilities_enhanced",
                     "last_updated": datetime.now().isoformat(),
-                    "ogc_compliant": True
+                    "ogc_compliant": True,
+                    "capabilities_source": ogc_details.get('bbox', {}).get('source', 'capabilities'),
+                    "has_feature_schema": bool(ogc_details.get('feature_schema')),
+                    "has_dynamic_bbox": bool(ogc_details.get('dynamic_bbox')),
+                    "primary_service": ogc_details.get('primary_service', target_layer['service_type'])
                 }
             }
             

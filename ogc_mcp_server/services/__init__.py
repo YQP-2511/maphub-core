@@ -1,20 +1,15 @@
-"""业务服务模块
+"""
+服务模块
 
-包含各种业务逻辑和服务功能
+提供OGC服务相关的业务逻辑
 """
 
-from .layer_service import (
-    register_ogc_layers,
-    list_registered_layers,
-    delete_layer_resource,
-    update_layer_resource,
-    get_layer_statistics
-)
+from .layer_service import register_ogc_layers
+from .ogc_parser import OGCServiceParser, ogc_parser, get_ogc_parser
 
 __all__ = [
-    "register_ogc_layers",
-    "list_registered_layers", 
-    "delete_layer_resource",
-    "update_layer_resource",
-    "get_layer_statistics"
+    'register_ogc_layers',
+    'OGCServiceParser', 
+    'ogc_parser', 
+    'get_ogc_parser'
 ]

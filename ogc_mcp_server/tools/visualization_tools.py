@@ -1,8 +1,8 @@
 """多图层可视化工具模块
 
 基于FastMCP最佳实践设计的多图层可视化工具
-让AI自主选择WMS或WFS图层，支持灵活的图层组合和可视化
-移除自动判断逻辑，由AI根据数据特性和需求决定服务类型
+充分利用layer_registry资源提供的增强信息，避免重复处理
+支持动态边界框、要素模式等高级功能
 
 工具设计：
 - add_wms_layer: 添加WMS图层到可视化
@@ -19,7 +19,7 @@ from pydantic import Field
 from typing_extensions import Annotated
 
 from ..services.web_server.server import get_web_server
-from ..utils.ogc_parser import get_ogc_parser
+from ..services.ogc_parser import get_ogc_parser
 
 logger = logging.getLogger(__name__)
 
@@ -55,15 +55,15 @@ async def add_wms_layer(
         if ctx:
             await ctx.info(f"正在添加WMS图层: {layer_name}")
         
-        # 获取图层信息
+        # 获取图层信息（利用layer_registry资源）
         layer_info = await _get_layer_from_resource(layer_name, ctx)
         
         # 验证图层支持WMS
         if not layer_info["access_parameters"].get("wms"):
             raise ValueError(f"图层 {layer_name} 不支持WMS服务")
         
-        # 创建WMS图层对象
-        wms_layer = await _create_wms_layer(layer_info, layer_title or layer_name, ctx)
+        # 创建WMS图层对象（利用资源中的增强信息）
+        wms_layer = _create_wms_layer_from_resource(layer_info, layer_title or layer_name)
         
         # 添加到图层列表
         _current_layers.append(wms_layer)
@@ -76,7 +76,9 @@ async def add_wms_layer(
             "layer_added": {
                 "name": layer_name,
                 "title": wms_layer["title"],
-                "type": "wms"
+                "type": "wms",
+                "has_dynamic_bbox": bool(wms_layer.get("dynamic_bbox")),
+                "bbox_source": wms_layer.get("bbox_source", "static")
             },
             "current_layer_count": len(_current_layers),
             "message": f"WMS图层 {layer_name} 已添加到可视化列表"
@@ -95,6 +97,7 @@ async def add_wfs_layer(
     layer_name: Annotated[str, Field(description="WFS图层名称")],
     layer_title: Annotated[str, Field(description="图层显示标题")] = None,
     max_features: Annotated[int, Field(description="最大要素数量")] = 100,
+    use_enhanced_data: Annotated[bool, Field(description="是否使用增强的要素模式信息")] = True,
     ctx: Context = None
 ) -> Dict[str, Any]:
     """添加WFS图层到可视化列表
@@ -108,6 +111,7 @@ async def add_wfs_layer(
         layer_name: WFS图层名称
         layer_title: 图层显示标题（可选，默认使用图层名称）
         max_features: 最大要素数量（默认100，避免数据过载）
+        use_enhanced_data: 是否使用增强的要素模式信息
         ctx: MCP上下文对象
         
     Returns:
@@ -117,15 +121,21 @@ async def add_wfs_layer(
         if ctx:
             await ctx.info(f"正在添加WFS图层: {layer_name}，最大要素数: {max_features}")
         
-        # 获取图层信息
+        # 获取图层信息（利用layer_registry资源）
         layer_info = await _get_layer_from_resource(layer_name, ctx)
         
         # 验证图层支持WFS
         if not layer_info["access_parameters"].get("wfs"):
             raise ValueError(f"图层 {layer_name} 不支持WFS服务")
         
-        # 创建WFS图层对象
-        wfs_layer = await _create_wfs_layer(layer_info, layer_title or layer_name, max_features, ctx)
+        # 创建WFS图层对象（利用资源中的增强信息）
+        wfs_layer = await _create_wfs_layer_from_resource(
+            layer_info, 
+            layer_title or layer_name, 
+            max_features, 
+            use_enhanced_data,
+            ctx
+        )
         
         # 添加到图层列表
         _current_layers.append(wfs_layer)
@@ -140,7 +150,10 @@ async def add_wfs_layer(
                 "name": layer_name,
                 "title": wfs_layer["title"],
                 "type": "wfs",
-                "feature_count": feature_count
+                "feature_count": feature_count,
+                "has_feature_schema": bool(wfs_layer.get("feature_schema")),
+                "has_dynamic_bbox": bool(wfs_layer.get("dynamic_bbox")),
+                "geometry_types": wfs_layer.get("stats", {}).get("geometry_types", [])
             },
             "current_layer_count": len(_current_layers),
             "message": f"WFS图层 {layer_name} 已添加到可视化列表，包含 {feature_count} 个要素"
@@ -158,16 +171,19 @@ async def add_wfs_layer(
 async def create_composite_visualization(
     title: Annotated[str, Field(description="可视化标题")] = "多图层复合可视化",
     visualization_type: Annotated[str, Field(description="可视化类型: overlay(叠加显示), comparison(对比显示)")] = "overlay",
+    auto_fit_bounds: Annotated[bool, Field(description="是否自动适配边界框")] = True,
     ctx: Context = None
 ) -> Dict[str, Any]:
     """创建多图层复合可视化
     
     将当前添加的所有图层组合成一个可视化页面
     支持叠加显示和对比显示两种模式
+    自动利用动态边界框信息优化地图显示
     
     Args:
         title: 可视化标题
         visualization_type: 可视化类型（overlay叠加 或 comparison对比）
+        auto_fit_bounds: 是否自动适配边界框
         ctx: MCP上下文对象
         
     Returns:
@@ -183,8 +199,8 @@ async def create_composite_visualization(
         # 获取Web服务器
         web_server = await get_web_server()
         
-        # 配置地图设置
-        map_config = _configure_map_settings(_current_layers)
+        # 配置地图设置（利用动态边界框信息）
+        map_config = _configure_enhanced_map_settings(_current_layers, auto_fit_bounds)
         
         # 根据可视化类型创建结果
         if visualization_type == "comparison":
@@ -241,7 +257,7 @@ async def list_current_layers(
 ) -> Dict[str, Any]:
     """列出当前已添加的图层
     
-    显示当前图层列表的状态，包括图层类型和基本信息
+    显示当前图层列表的状态，包括图层类型和增强信息
     
     Args:
         ctx: MCP上下文对象
@@ -259,17 +275,7 @@ async def list_current_layers(
     
     layer_summaries = []
     for layer in _current_layers:
-        summary = {
-            "name": layer["name"],
-            "title": layer["title"],
-            "type": layer["type"],
-            "service_type": layer.get("service_type", "unknown")
-        }
-        
-        if layer["type"] == "wfs":
-            feature_count = len(layer.get("geojson_data", {}).get("features", []))
-            summary["feature_count"] = feature_count
-        
+        summary = _create_enhanced_layer_summary(layer)
         layer_summaries.append(summary)
     
     if ctx:
@@ -279,67 +285,107 @@ async def list_current_layers(
         "success": True,
         "layer_count": len(_current_layers),
         "layers": layer_summaries,
+        "enhanced_features": {
+            "dynamic_bbox_count": sum(1 for layer in _current_layers if layer.get("dynamic_bbox")),
+            "feature_schema_count": sum(1 for layer in _current_layers if layer.get("feature_schema")),
+            "total_features": sum(len(layer.get("geojson_data", {}).get("features", [])) for layer in _current_layers if layer.get("type") == "wfs")
+        },
         "message": f"当前有 {len(_current_layers)} 个图层待可视化"
     }
 
 
-# 核心处理函数
+# 核心处理函数 - 优化版本，充分利用资源信息
 
-async def _create_wms_layer(
+def _create_wms_layer_from_resource(
     layer_info: Dict[str, Any], 
-    title: str, 
-    ctx: Context
+    title: str
 ) -> Dict[str, Any]:
-    """创建WMS图层对象"""
+    """从资源信息创建WMS图层对象
+    
+    充分利用layer_registry提供的增强信息
+    """
     basic_info = layer_info["basic_info"]
     wms_params = layer_info["access_parameters"]["wms"]
+    enhanced_details = layer_info.get("enhanced_details", {})
+    capabilities = layer_info.get("capabilities", {})
     
-    return {
+    # 构建增强的WMS图层对象
+    wms_layer = {
         "name": basic_info["layer_name"],
         "title": title,
         "type": "wms",
         "service_type": basic_info["service_type"],
         "layer_info": basic_info,
-        "wms_url": wms_params.get("base_url", ""),
-        "wms_params": wms_params.get("params", {})
+        "wms_url": basic_info["service_url"],
+        "wms_params": wms_params,
+        # 增强信息
+        "bbox": capabilities.get("bbox"),
+        "dynamic_bbox": enhanced_details.get("dynamic_bbox"),
+        "bbox_source": "dynamic" if enhanced_details.get("dynamic_bbox") else "static",
+        "crs_list": capabilities.get("crs_list", ["EPSG:4326"]),
+        "styles": enhanced_details.get("styles_detailed", []),
+        "wms_specific": enhanced_details.get("wms_specific", {})
     }
+    
+    return wms_layer
 
 
-async def _create_wfs_layer(
+async def _create_wfs_layer_from_resource(
     layer_info: Dict[str, Any], 
     title: str, 
-    max_features: int, 
+    max_features: int,
+    use_enhanced_data: bool,
     ctx: Context
 ) -> Dict[str, Any]:
-    """创建WFS图层对象"""
+    """从资源信息创建WFS图层对象
+    
+    充分利用layer_registry提供的增强信息，避免重复请求
+    """
     basic_info = layer_info["basic_info"]
     wfs_params = layer_info["access_parameters"]["wfs"]
+    enhanced_details = layer_info.get("enhanced_details", {})
+    capabilities = layer_info.get("capabilities", {})
     
-    # 获取WFS数据
-    geojson_data = await _fetch_wfs_data(layer_info, max_features, ctx)
+    # 获取WFS数据（仍需要实际数据用于可视化）
+    geojson_data = await _fetch_optimized_wfs_data(layer_info, max_features, ctx)
     
-    return {
+    # 构建增强的WFS图层对象
+    wfs_layer = {
         "name": basic_info["layer_name"],
         "title": title,
         "type": "wfs",
         "service_type": basic_info["service_type"],
         "layer_info": basic_info,
         "geojson_data": geojson_data,
-        "stats": _calculate_geojson_stats(geojson_data),
-        "style": _get_default_geojson_style()
+        "stats": _calculate_enhanced_geojson_stats(geojson_data, capabilities),
+        "style": _get_enhanced_geojson_style(enhanced_details),
+        # 增强信息
+        "bbox": capabilities.get("bbox"),
+        "dynamic_bbox": enhanced_details.get("dynamic_bbox"),
+        "bbox_source": "dynamic" if enhanced_details.get("dynamic_bbox") else "static",
+        "feature_schema": enhanced_details.get("feature_schema") if use_enhanced_data else None,
+        "attributes": capabilities.get("attributes", []),
+        "geometry_type": capabilities.get("geometry_type"),
+        "crs_list": capabilities.get("crs_list", ["EPSG:4326"])
     }
+    
+    return wfs_layer
 
 
-async def _fetch_wfs_data(
+async def _fetch_optimized_wfs_data(
     layer_info: Dict[str, Any], 
     max_features: int, 
     ctx: Context
 ) -> Dict[str, Any]:
-    """获取WFS数据"""
+    """优化的WFS数据获取
+    
+    利用资源中的边界框信息优化请求
+    """
     basic_info = layer_info["basic_info"]
     wfs_params = layer_info["access_parameters"]["wfs"]
+    enhanced_details = layer_info.get("enhanced_details", {})
     
-    # 构建请求参数
+    # 构建优化的请求参数
     params = {
         "service": "WFS",
         "version": wfs_params["version"],
@@ -348,6 +394,14 @@ async def _fetch_wfs_data(
         "maxFeatures": str(max_features),
         "outputFormat": "application/json"
     }
+    
+    # 如果有动态边界框，使用它来限制查询范围
+    dynamic_bbox = enhanced_details.get("dynamic_bbox")
+    if dynamic_bbox and dynamic_bbox.get("bbox"):
+        bbox_str = ",".join(map(str, dynamic_bbox["bbox"]))
+        params["bbox"] = bbox_str
+        if ctx:
+            await ctx.info(f"使用动态边界框优化WFS查询: {bbox_str}")
     
     if ctx:
         await ctx.info(f"正在获取WFS数据，最大要素数: {max_features}")
@@ -383,7 +437,7 @@ async def _create_overlay_visualization(
         map_config=map_config
     )
     
-    layer_summaries = [_create_layer_summary(layer) for layer in layers]
+    layer_summaries = [_create_enhanced_layer_summary(layer) for layer in layers]
     
     return {
         "success": True,
@@ -392,6 +446,8 @@ async def _create_overlay_visualization(
         "type": "overlay",
         "layer_count": len(layers),
         "layer_summaries": layer_summaries,
+        "map_config": map_config,
+        "enhanced_features": _get_visualization_enhanced_features(layers),
         "web_server_url": web_server._get_base_url(),
         "instructions": f"在浏览器中访问: {visualization_url}"
     }
@@ -428,10 +484,15 @@ async def _create_comparison_visualization(
         visualization_urls.append({
             "layer_name": layer["name"],
             "layer_title": layer["title"],
-            "url": url
+            "url": url,
+            "enhanced_info": {
+                "has_dynamic_bbox": bool(layer.get("dynamic_bbox")),
+                "has_feature_schema": bool(layer.get("feature_schema")),
+                "bbox_source": layer.get("bbox_source", "static")
+            }
         })
     
-    layer_summaries = [_create_layer_summary(layer) for layer in layers]
+    layer_summaries = [_create_enhanced_layer_summary(layer) for layer in layers]
     
     return {
         "success": True,
@@ -439,6 +500,8 @@ async def _create_comparison_visualization(
         "title": title,
         "visualization_urls": visualization_urls,
         "layer_summaries": layer_summaries,
+        "map_config": map_config,
+        "enhanced_features": _get_visualization_enhanced_features(layers),
         "web_server_url": web_server._get_base_url(),
         "instructions": "每个图层都有独立的可视化链接，可以分别查看对比"
     }
@@ -447,7 +510,10 @@ async def _create_comparison_visualization(
 # 资源和工具函数
 
 async def _get_layer_from_resource(layer_name: str, ctx: Context) -> Dict[str, Any]:
-    """通过资源获取图层信息"""
+    """通过资源获取图层信息
+    
+    这是与layer_registry的核心连接点
+    """
     try:
         layer_resource = await ctx.read_resource(f"ogc://layer/{layer_name}")
         
@@ -472,51 +538,166 @@ async def _get_layer_from_resource(layer_name: str, ctx: Context) -> Dict[str, A
         raise ValueError(f"获取图层资源失败: {e}")
 
 
-def _create_layer_summary(layer: Dict[str, Any]) -> Dict[str, Any]:
-    """创建图层摘要信息"""
+def _create_enhanced_layer_summary(layer: Dict[str, Any]) -> Dict[str, Any]:
+    """创建增强的图层摘要信息"""
     summary = {
         "name": layer["name"],
         "title": layer["title"],
         "type": layer["type"],
-        "service_type": layer.get("service_type", "unknown")
+        "service_type": layer.get("service_type", "unknown"),
+        "bbox_source": layer.get("bbox_source", "static"),
+        "has_dynamic_bbox": bool(layer.get("dynamic_bbox")),
+        "has_feature_schema": bool(layer.get("feature_schema"))
     }
     
     if layer["type"] == "wfs":
         feature_count = len(layer.get("geojson_data", {}).get("features", []))
-        summary["feature_count"] = feature_count
-        summary["geometry_types"] = layer.get("stats", {}).get("geometry_types", [])
+        summary.update({
+            "feature_count": feature_count,
+            "geometry_types": layer.get("stats", {}).get("geometry_types", []),
+            "geometry_type": layer.get("geometry_type"),
+            "attribute_count": len(layer.get("attributes", []))
+        })
+    elif layer["type"] == "wms":
+        summary.update({
+            "styles_count": len(layer.get("styles", [])),
+            "crs_count": len(layer.get("crs_list", []))
+        })
     
     return summary
 
 
-def _configure_map_settings(layers: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """配置地图设置"""
-    return {
-        "center": [39.9042, 116.4074],  # 默认北京
-        "zoom": 10,
+def _configure_enhanced_map_settings(layers: List[Dict[str, Any]], auto_fit_bounds: bool = True) -> Dict[str, Any]:
+    """配置增强的地图设置
+    
+    利用动态边界框信息自动优化地图显示
+    """
+    map_config = {
         "width": 1200,
-        "height": 800
+        "height": 800,
+        "zoom": 10,
+        "center": [39.9042, 116.4074]  # 默认北京
     }
+    
+    if auto_fit_bounds and layers:
+        # 尝试从动态边界框计算最佳视图
+        dynamic_bboxes = []
+        static_bboxes = []
+        
+        for layer in layers:
+            dynamic_bbox = layer.get("dynamic_bbox")
+            if dynamic_bbox and dynamic_bbox.get("bbox"):
+                dynamic_bboxes.append(dynamic_bbox["bbox"])
+            elif layer.get("bbox") and layer["bbox"].get("wgs84"):
+                static_bboxes.append(layer["bbox"]["wgs84"])
+        
+        # 优先使用动态边界框
+        bboxes_to_use = dynamic_bboxes if dynamic_bboxes else static_bboxes
+        
+        if bboxes_to_use:
+            # 计算合并边界框
+            combined_bbox = _calculate_combined_bbox(bboxes_to_use)
+            if combined_bbox:
+                center_lon = (combined_bbox[0] + combined_bbox[2]) / 2
+                center_lat = (combined_bbox[1] + combined_bbox[3]) / 2
+                map_config["center"] = [center_lat, center_lon]
+                
+                # 根据边界框大小调整缩放级别
+                bbox_width = abs(combined_bbox[2] - combined_bbox[0])
+                bbox_height = abs(combined_bbox[3] - combined_bbox[1])
+                max_extent = max(bbox_width, bbox_height)
+                
+                if max_extent > 10:
+                    map_config["zoom"] = 6
+                elif max_extent > 1:
+                    map_config["zoom"] = 8
+                elif max_extent > 0.1:
+                    map_config["zoom"] = 10
+                else:
+                    map_config["zoom"] = 12
+    
+    return map_config
 
 
-def _calculate_geojson_stats(geojson_data: Dict[str, Any]) -> Dict[str, Any]:
-    """计算GeoJSON统计信息"""
+def _calculate_combined_bbox(bboxes: List[List[float]]) -> Optional[List[float]]:
+    """计算多个边界框的合并边界框"""
+    if not bboxes:
+        return None
+    
+    min_x = min(bbox[0] for bbox in bboxes)
+    min_y = min(bbox[1] for bbox in bboxes)
+    max_x = max(bbox[2] for bbox in bboxes)
+    max_y = max(bbox[3] for bbox in bboxes)
+    
+    return [min_x, min_y, max_x, max_y]
+
+
+def _calculate_enhanced_geojson_stats(geojson_data: Dict[str, Any], capabilities: Dict[str, Any]) -> Dict[str, Any]:
+    """计算增强的GeoJSON统计信息"""
     features = geojson_data.get("features", [])
-    return {
+    
+    stats = {
         "feature_count": len(features),
         "geometry_types": list(set(
             feature.get("geometry", {}).get("type", "Unknown") 
             for feature in features
         ))
     }
+    
+    # 添加属性统计
+    if features and capabilities.get("attributes"):
+        attribute_stats = {}
+        for attr in capabilities["attributes"]:
+            attr_name = attr.get("name")
+            if attr_name:
+                values = [
+                    feature.get("properties", {}).get(attr_name) 
+                    for feature in features 
+                    if feature.get("properties", {}).get(attr_name) is not None
+                ]
+                attribute_stats[attr_name] = {
+                    "count": len(values),
+                    "type": attr.get("type", "unknown")
+                }
+        stats["attribute_stats"] = attribute_stats
+    
+    return stats
 
 
-def _get_default_geojson_style() -> Dict[str, Any]:
-    """获取默认GeoJSON样式"""
-    return {
+def _get_enhanced_geojson_style(enhanced_details: Dict[str, Any]) -> Dict[str, Any]:
+    """获取增强的GeoJSON样式"""
+    base_style = {
         "color": "#3388ff",
         "weight": 2,
         "opacity": 0.8,
         "fillColor": "#3388ff",
         "fillOpacity": 0.2
+    }
+    
+    # 如果有详细样式信息，可以在这里进行增强
+    styles_detailed = enhanced_details.get("styles_detailed", [])
+    if styles_detailed:
+        # 可以根据样式信息调整默认样式
+        pass
+    
+    return base_style
+
+
+def _get_visualization_enhanced_features(layers: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """获取可视化的增强功能统计"""
+    return {
+        "total_layers": len(layers),
+        "wms_layers": len([l for l in layers if l.get("type") == "wms"]),
+        "wfs_layers": len([l for l in layers if l.get("type") == "wfs"]),
+        "dynamic_bbox_layers": len([l for l in layers if l.get("dynamic_bbox")]),
+        "feature_schema_layers": len([l for l in layers if l.get("feature_schema")]),
+        "total_features": sum(
+            len(l.get("geojson_data", {}).get("features", [])) 
+            for l in layers if l.get("type") == "wfs"
+        ),
+        "unique_geometry_types": list(set(
+            geom_type
+            for layer in layers if layer.get("type") == "wfs"
+            for geom_type in layer.get("stats", {}).get("geometry_types", [])
+        ))
     }
