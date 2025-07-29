@@ -13,6 +13,7 @@ from .wfs_schema import WFSSchemaParser
 from .bbox_utils import BBoxUtils
 from .capabilities_parser import CapabilitiesParser
 from .layer_details import LayerDetailsParser
+from .filter_builder import WFSFilterBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -42,12 +43,66 @@ class OGCServiceParser:
             self.wfs_schema_parser, 
             timeout
         )
+        self.filter_builder = WFSFilterBuilder()
     
     async def close(self):
         """关闭所有HTTP客户端"""
         await self.url_utils.close()
         await self.wfs_schema_parser.close()
         await self.bbox_utils.close()
+    
+    # 过滤器构建方法（委托给filter_builder）
+    def create_filter_builder(self) -> WFSFilterBuilder:
+        """创建新的过滤器构建器实例
+        
+        Returns:
+            WFS过滤器构建器实例
+        """
+        return WFSFilterBuilder()
+    
+    def build_property_filter(self, property_name: str, value, operator: str = "PropertyIsEqualTo") -> str:
+        """构建属性过滤器（便捷方法）
+        
+        Args:
+            property_name: 属性名称
+            value: 属性值
+            operator: 过滤操作符
+            
+        Returns:
+            CQL过滤器字符串
+        """
+        builder = WFSFilterBuilder()
+        builder.add_property_filter(property_name, value, operator)
+        return builder.build_cql_filter()
+    
+    def build_like_filter(self, property_name: str, pattern: str) -> str:
+        """构建模糊匹配过滤器（便捷方法）
+        
+        Args:
+            property_name: 属性名称
+            pattern: 匹配模式
+            
+        Returns:
+            CQL过滤器字符串
+        """
+        builder = WFSFilterBuilder()
+        builder.add_like_filter(property_name, pattern)
+        return builder.build_cql_filter()
+    
+    def build_range_filter(self, property_name: str, min_value, max_value) -> str:
+        """构建范围过滤器（便捷方法）
+        
+        Args:
+            property_name: 属性名称
+            min_value: 最小值
+            max_value: 最大值
+            
+        Returns:
+            CQL过滤器字符串
+        """
+        builder = WFSFilterBuilder()
+        builder.add_range_filter(property_name, min_value, max_value)
+        return builder.build_cql_filter()
     
     # URL处理方法（委托给url_utils）
     def _normalize_service_url(self, url: str, service_type: str) -> str:

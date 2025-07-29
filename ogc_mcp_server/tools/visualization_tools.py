@@ -6,7 +6,7 @@
 
 工具设计：
 - add_wms_layer: 添加WMS图层到可视化
-- add_wfs_layer: 添加WFS图层到可视化  
+- add_wfs_layer: 添加WFS图层到可视化（支持属性过滤）
 - create_composite_visualization: 创建多图层复合可视化
 - clear_visualization_layers: 清空当前图层列表
 """
@@ -98,6 +98,8 @@ async def add_wfs_layer(
     layer_title: Annotated[str, Field(description="图层显示标题")] = None,
     max_features: Annotated[int, Field(description="最大要素数量")] = 100,
     use_enhanced_data: Annotated[bool, Field(description="是否使用增强的要素模式信息")] = True,
+    property_filters: Annotated[Optional[List[Dict[str, Any]]], Field(description="属性过滤条件列表，格式：[{'property': 'name', 'value': 'value', 'operator': '='}]")] = None,
+    cql_filter: Annotated[Optional[str], Field(description="自定义CQL过滤器字符串（优先级高于property_filters）")] = None,
     ctx: Context = None
 ) -> Dict[str, Any]:
     """添加WFS图层到可视化列表
@@ -107,11 +109,17 @@ async def add_wfs_layer(
     - 属性数据展示
     - 交互式要素查询
     
+    支持属性过滤功能：
+    - property_filters: 简单属性过滤条件列表
+    - cql_filter: 自定义CQL过滤器字符串
+    
     Args:
         layer_name: WFS图层名称
         layer_title: 图层显示标题（可选，默认使用图层名称）
         max_features: 最大要素数量（默认100，避免数据过载）
         use_enhanced_data: 是否使用增强的要素模式信息
+        property_filters: 属性过滤条件列表
+        cql_filter: 自定义CQL过滤器字符串
         ctx: MCP上下文对象
         
     Returns:
@@ -128,12 +136,18 @@ async def add_wfs_layer(
         if not layer_info["access_parameters"].get("wfs"):
             raise ValueError(f"图层 {layer_name} 不支持WFS服务")
         
+        # 构建过滤器
+        filter_info = await _build_wfs_filters(
+            layer_info, property_filters, cql_filter, ctx
+        )
+        
         # 创建WFS图层对象（利用资源中的增强信息）
         wfs_layer = await _create_wfs_layer_from_resource(
             layer_info, 
             layer_title or layer_name, 
             max_features, 
             use_enhanced_data,
+            filter_info,
             ctx
         )
         
@@ -142,7 +156,8 @@ async def add_wfs_layer(
         
         feature_count = len(wfs_layer.get("geojson_data", {}).get("features", []))
         if ctx:
-            await ctx.info(f"✅ WFS图层 {layer_name} 添加成功，包含 {feature_count} 个要素，当前共 {len(_current_layers)} 个图层")
+            filter_msg = f"，应用了过滤器" if filter_info.get("cql_filter") else ""
+            await ctx.info(f"✅ WFS图层 {layer_name} 添加成功，包含 {feature_count} 个要素{filter_msg}，当前共 {len(_current_layers)} 个图层")
         
         return {
             "success": True,
@@ -153,7 +168,9 @@ async def add_wfs_layer(
                 "feature_count": feature_count,
                 "has_feature_schema": bool(wfs_layer.get("feature_schema")),
                 "has_dynamic_bbox": bool(wfs_layer.get("dynamic_bbox")),
-                "geometry_types": wfs_layer.get("stats", {}).get("geometry_types", [])
+                "geometry_types": wfs_layer.get("stats", {}).get("geometry_types", []),
+                "filter_applied": bool(filter_info.get("cql_filter")),
+                "filter_summary": filter_info.get("summary", {})
             },
             "current_layer_count": len(_current_layers),
             "message": f"WFS图层 {layer_name} 已添加到可视化列表，包含 {feature_count} 个要素"
@@ -296,6 +313,92 @@ async def list_current_layers(
 
 # 核心处理函数 - 优化版本，充分利用资源信息
 
+async def _build_wfs_filters(
+    layer_info: Dict[str, Any],
+    property_filters: Optional[List[Dict[str, Any]]],
+    cql_filter: Optional[str],
+    ctx: Context
+) -> Dict[str, Any]:
+    """构建WFS过滤器信息
+    
+    Args:
+        layer_info: 图层信息
+        property_filters: 属性过滤条件列表
+        cql_filter: 自定义CQL过滤器
+        ctx: MCP上下文对象
+        
+    Returns:
+        过滤器信息字典
+    """
+    filter_info = {
+        "cql_filter": None,
+        "summary": {},
+        "applied_filters": []
+    }
+    
+    # 如果提供了自定义CQL过滤器，优先使用
+    if cql_filter:
+        filter_info["cql_filter"] = cql_filter
+        filter_info["summary"] = {"type": "custom_cql", "filter": cql_filter}
+        filter_info["applied_filters"] = ["custom_cql"]
+        
+        if ctx:
+            await ctx.info(f"使用自定义CQL过滤器: {cql_filter}")
+        
+        return filter_info
+    
+    # 如果提供了属性过滤条件，构建CQL过滤器
+    if property_filters:
+        try:
+            parser = await get_ogc_parser()
+            builder = parser.create_filter_builder()
+            
+            for filter_condition in property_filters:
+                property_name = filter_condition.get("property")
+                value = filter_condition.get("value")
+                operator = filter_condition.get("operator", "=")
+                
+                # 映射操作符
+                operator_map = {
+                    "=": "PropertyIsEqualTo",
+                    "!=": "PropertyIsNotEqualTo",
+                    ">": "PropertyIsGreaterThan",
+                    ">=": "PropertyIsGreaterThanOrEqualTo",
+                    "<": "PropertyIsLessThan",
+                    "<=": "PropertyIsLessThanOrEqualTo",
+                    "LIKE": "PropertyIsLike"
+                }
+                
+                ogc_operator = operator_map.get(operator, "PropertyIsEqualTo")
+                
+                if operator == "LIKE":
+                    builder.add_like_filter(property_name, value)
+                else:
+                    builder.add_property_filter(property_name, value, ogc_operator)
+                
+                filter_info["applied_filters"].append({
+                    "property": property_name,
+                    "value": value,
+                    "operator": operator
+                })
+            
+            # 构建CQL过滤器
+            cql_filter = builder.build_cql_filter()
+            if cql_filter:
+                filter_info["cql_filter"] = cql_filter
+                filter_info["summary"] = builder.get_filter_summary()
+                
+                if ctx:
+                    await ctx.info(f"构建属性过滤器: {cql_filter}")
+            
+        except Exception as e:
+            logger.warning(f"构建属性过滤器失败: {e}")
+            if ctx:
+                await ctx.warning(f"构建属性过滤器失败，将不使用过滤器: {e}")
+    
+    return filter_info
+
+
 def _create_wms_layer_from_resource(
     layer_info: Dict[str, Any], 
     title: str
@@ -335,6 +438,7 @@ async def _create_wfs_layer_from_resource(
     title: str, 
     max_features: int,
     use_enhanced_data: bool,
+    filter_info: Dict[str, Any],
     ctx: Context
 ) -> Dict[str, Any]:
     """从资源信息创建WFS图层对象
@@ -347,7 +451,7 @@ async def _create_wfs_layer_from_resource(
     capabilities = layer_info.get("capabilities", {})
     
     # 获取WFS数据（仍需要实际数据用于可视化）
-    geojson_data = await _fetch_optimized_wfs_data(layer_info, max_features, ctx)
+    geojson_data = await _fetch_optimized_wfs_data(layer_info, max_features, filter_info, ctx)
     
     # 构建增强的WFS图层对象
     wfs_layer = {
@@ -366,7 +470,9 @@ async def _create_wfs_layer_from_resource(
         "feature_schema": enhanced_details.get("feature_schema") if use_enhanced_data else None,
         "attributes": capabilities.get("attributes", []),
         "geometry_type": capabilities.get("geometry_type"),
-        "crs_list": capabilities.get("crs_list", ["EPSG:4326"])
+        "crs_list": capabilities.get("crs_list", ["EPSG:4326"]),
+        # 过滤器信息
+        "filter_info": filter_info
     }
     
     return wfs_layer
@@ -374,12 +480,13 @@ async def _create_wfs_layer_from_resource(
 
 async def _fetch_optimized_wfs_data(
     layer_info: Dict[str, Any], 
-    max_features: int, 
+    max_features: int,
+    filter_info: Dict[str, Any],
     ctx: Context
 ) -> Dict[str, Any]:
     """优化的WFS数据获取
     
-    利用资源中的边界框信息优化请求
+    利用资源中的边界框信息和过滤器优化请求
     """
     basic_info = layer_info["basic_info"]
     wfs_params = layer_info["access_parameters"]["wfs"]
@@ -395,6 +502,13 @@ async def _fetch_optimized_wfs_data(
         "outputFormat": "application/json"
     }
     
+    # 添加CQL过滤器
+    cql_filter = filter_info.get("cql_filter")
+    if cql_filter:
+        params["CQL_FILTER"] = cql_filter
+        if ctx:
+            await ctx.info(f"应用CQL过滤器: {cql_filter}")
+    
     # 如果有动态边界框，使用它来限制查询范围
     dynamic_bbox = enhanced_details.get("dynamic_bbox")
     if dynamic_bbox and dynamic_bbox.get("bbox"):
@@ -406,9 +520,9 @@ async def _fetch_optimized_wfs_data(
     if ctx:
         await ctx.info(f"正在获取WFS数据，最大要素数: {max_features}")
     
-    # 发送请求
+    # 发送请求 - 修复HTTP客户端访问
     parser = await get_ogc_parser()
-    response = await parser.http_client.get(basic_info["service_url"], params=params)
+    response = await parser.url_utils.http_client.get(basic_info["service_url"], params=params)
     
     if response.status_code != 200:
         raise RuntimeError(f"WFS请求失败: {response.status_code}")
