@@ -53,7 +53,7 @@ def geo_visualization_workflow(
 **使用 `list_layers_from_resource` 工具**：
    - 查看当前可用的图层资源
    - 识别与{target_region}和{analysis_goal}相关的图层
-   - 注意图层的服务类型（WMS、WFS、BOTH）
+   - 注意图层的服务类型（WMS、WFS）
 
 #### 步骤2：分析图层特性和用途
 **对于每个相关图层，分析其特性**：
@@ -203,8 +203,8 @@ def layer_selection_guide(
 ## 🛠️ 推荐操作：
 
 1. **首先使用 `list_layers_from_resource` 查看图层 {layer_name} 的详细信息**
-2. **根据图层的服务类型（WMS/WFS/BOTH）和你的分析目的选择**
-3. **如果是BOTH类型，根据上述指导原则选择最适合的服务类型**
+2. **根据图层的服务类型（WMS/WFS）和你的分析目的选择**
+3. **根据上述指导原则选择最适合的服务类型**
 4. **使用相应的工具添加图层：**
    - WMS: `add_wms_layer`
    - WFS: `add_wfs_layer`

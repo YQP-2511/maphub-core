@@ -153,9 +153,9 @@ class OGCServiceParser:
         return await self.capabilities_parser.parse_ogc_service(url, service_name)
     
     # 图层详细信息方法（委托给layer_details_parser）
-    async def get_layer_details(self, service_url: str, service_type: str, layer_name: str):
+    async def get_layer_details(self, service_url: str, service_type: str, layer_name: str, strict_mode: bool = False):
         """获取图层详细信息"""
-        return await self.layer_details_parser.get_layer_details(service_url, service_type, layer_name)
+        return await self.layer_details_parser.get_layer_details(service_url, service_type, layer_name, strict_mode)
     
     async def _get_wms_layer_details(self, service_url: str, layer_name: str):
         """获取WMS图层详细信息"""

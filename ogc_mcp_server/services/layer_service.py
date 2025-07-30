@@ -103,80 +103,49 @@ async def register_ogc_layers(
             # 处理每个图层名称
             for layer_name, layer_variants in parsed_layers_by_name.items():
                 try:
-                    # 检查该图层是否已存在（按service_url和layer_name查找）
-                    existing_layer = None
-                    for existing in existing_layers:
-                        if existing.layer_name == layer_name:
-                            existing_layer = existing
-                            break
-                    
-                    # 确定最终的服务类型
-                    service_types = [layer.service_type for layer in layer_variants]
-                    if len(service_types) > 1:
-                        final_service_type = "BOTH"
-                    else:
-                        final_service_type = service_types[0]
-                    
-                    # 使用第一个变体作为基础信息（它们的基础信息应该相同）
-                    base_layer = layer_variants[0]
-                    
-                    if existing_layer:
-                        # 检查是否需要更新服务类型
-                        if existing_layer.service_type != final_service_type:
-                            # 更新服务类型
-                            update_data = LayerResourceUpdate(service_type=final_service_type)
-                            updated_layer = await repository.update(existing_layer.resource_id, update_data)
-                            
-                            if updated_layer:
-                                merged_layers += 1
-                                service_result["layers"].append({
-                                    "name": layer_name,
-                                    "type": final_service_type,
-                                    "status": "merged",
-                                    "previous_type": existing_layer.service_type,
-                                    "resource_id": existing_layer.resource_id
-                                })
-                                logger.info(f"图层服务类型已合并: {layer_name} ({existing_layer.service_type} -> {final_service_type})")
-                            else:
-                                failed_layers += 1
-                                service_result["layers"].append({
-                                    "name": layer_name,
-                                    "type": final_service_type,
-                                    "status": "merge_failed",
-                                    "error": "update_failed"
-                                })
-                        else:
-                            # 服务类型相同，跳过
+                    # 为每个服务类型创建独立的图层记录，不再合并
+                    for layer_variant in layer_variants:
+                        # 检查该图层是否已存在（按service_url、layer_name和service_type查找）
+                        existing_layer = None
+                        for existing in existing_layers:
+                            if (existing.layer_name == layer_name and 
+                                existing.service_type == layer_variant.service_type):
+                                existing_layer = existing
+                                break
+                        
+                        if existing_layer:
+                            # 图层已存在，跳过
                             skipped_layers += 1
                             service_result["layers"].append({
                                 "name": layer_name,
-                                "type": final_service_type,
+                                "type": layer_variant.service_type,
                                 "status": "skipped",
-                                "reason": "already_exists"
+                                "reason": "already_exists",
+                                "resource_id": existing_layer.resource_id
                             })
-                            logger.info(f"图层已存在，跳过: {layer_name} ({final_service_type})")
-                    else:
-                        # 创建新图层资源
-                        new_layer = LayerResourceCreate(
-                            service_name=base_layer.service_name,
-                            service_url=base_layer.service_url,
-                            service_type=final_service_type,
-                            layer_name=base_layer.layer_name,
-                            layer_title=base_layer.layer_title,
-                            layer_abstract=base_layer.layer_abstract
-                        )
-                        
-                        created_layer = await repository.create(new_layer)
-                        successful_layers += 1
-                        
-                        service_result["layers"].append({
-                            "name": layer_name,
-                            "type": final_service_type,
-                            "status": "created",
-                            "resource_id": created_layer.resource_id
-                        })
-                        
-                        logger.info(f"图层注册成功: {layer_name} ({final_service_type})")
+                            logger.info(f"图层已存在，跳过: {layer_name} ({layer_variant.service_type})")
+                        else:
+                            # 创建新图层资源
+                            new_layer = LayerResourceCreate(
+                                service_name=layer_variant.service_name,
+                                service_url=layer_variant.service_url,
+                                service_type=layer_variant.service_type,
+                                layer_name=layer_variant.layer_name,
+                                layer_title=layer_variant.layer_title,
+                                layer_abstract=layer_variant.layer_abstract
+                            )
+                            
+                            created_layer = await repository.create(new_layer)
+                            successful_layers += 1
+                            
+                            service_result["layers"].append({
+                                "name": layer_name,
+                                "type": layer_variant.service_type,
+                                "status": "created",
+                                "resource_id": created_layer.resource_id
+                            })
+                            
+                            logger.info(f"图层注册成功: {layer_name} ({layer_variant.service_type})")
                     
                 except Exception as e:
                     failed_layers += 1
@@ -212,7 +181,7 @@ async def register_ogc_layers(
                         results["errors"].append(error_msg)
             
             successful_services += 1
-            logger.info(f"服务解析完成: {url}, 共处理 {len(parsed_layers_by_name)} 个图层，合并 {merged_layers} 个，删除 {len(service_result['deleted_layers'])} 个过期图层")
+            logger.info(f"服务解析完成: {url}, 共处理 {len(parsed_layers_by_name)} 个图层，删除 {len(service_result['deleted_layers'])} 个过期图层")
             
         except Exception as e:
             failed_services += 1
@@ -225,7 +194,7 @@ async def register_ogc_layers(
         
         results["services"].append(service_result)
     
-    # 汇总统计信息
+    # 汇总统计信息（移除merged_layers统计）
     results["summary"] = {
         "total_services": total_services,
         "successful_services": successful_services,
@@ -234,8 +203,7 @@ async def register_ogc_layers(
         "successful_layers": successful_layers,
         "failed_layers": failed_layers,
         "skipped_layers": skipped_layers,
-        "deleted_layers": deleted_layers,
-        "merged_layers": merged_layers
+        "deleted_layers": deleted_layers
     }
     
     if ctx:
@@ -243,7 +211,7 @@ async def register_ogc_layers(
         await ctx.info(
             f"图层注册完成: 成功服务 {successful_services}/{total_services}, "
             f"成功图层 {successful_layers}/{total_layers}, "
-            f"跳过图层 {skipped_layers}, 合并图层 {merged_layers}, 删除图层 {deleted_layers}"
+            f"跳过图层 {skipped_layers}, 删除图层 {deleted_layers}"
         )
     
     logger.info(f"图层注册任务完成: {results['summary']}")

@@ -75,8 +75,9 @@ async def get_wms_map_url(
         
         # 检查图层是否支持WMS服务
         service_type = target_layer.get("service_type", "").upper()
-        if service_type not in ["WMS", "BOTH"]:
-            raise ValueError(f"图层 {layer_name} 不支持WMS服务 (当前类型: {service_type})")
+        # 验证图层是否支持WMS服务
+        if service_type != "WMS":
+            raise ValueError(f"图层 {layer_name} 不支持WMS服务，当前服务类型: {service_type}")
         
         # 2. 读取图层详细配置
         layer_resource_result = await ctx.read_resource(f"ogc://layer/{layer_name}")

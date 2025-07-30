@@ -87,7 +87,7 @@ class DatabaseManager:
             resource_id TEXT PRIMARY KEY,
             service_name TEXT NOT NULL,
             service_url TEXT NOT NULL,
-            service_type TEXT NOT NULL CHECK (service_type IN ('WMS', 'WFS', 'BOTH')),
+            service_type TEXT NOT NULL CHECK (service_type IN ('WMS', 'WFS')),
             layer_name TEXT NOT NULL,
             layer_title TEXT,
             layer_abstract TEXT,
@@ -145,13 +145,13 @@ class DatabaseManager:
             # 删除旧表
             await conn.execute("DROP TABLE layer_resources;")
             
-            # 创建新的基础元数据表
+            # 创建新的基础元数据表（移除BOTH类型支持）
             await conn.execute("""
                 CREATE TABLE layer_resources (
                     resource_id TEXT PRIMARY KEY,
                     service_name TEXT NOT NULL,
                     service_url TEXT NOT NULL,
-                    service_type TEXT NOT NULL CHECK (service_type IN ('WMS', 'WFS', 'BOTH')),
+                    service_type TEXT NOT NULL CHECK (service_type IN ('WMS', 'WFS')),
                     layer_name TEXT NOT NULL,
                     layer_title TEXT,
                     layer_abstract TEXT,
@@ -170,7 +170,7 @@ class DatabaseManager:
             # 删除临时表
             await conn.execute("DROP TABLE layer_resources_backup;")
             
-            logger.info("表结构迁移完成，已移除动态参数字段")
+            logger.info("表结构迁移完成，已移除BOTH类型支持")
             
         except Exception as e:
             logger.error(f"表结构迁移失败: {e}")

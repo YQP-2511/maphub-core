@@ -60,46 +60,56 @@ class LayerDetailsParser:
         # 如果无法解析，返回字符串形式
         return crs_str
     
-    async def get_layer_details(self, service_url: str, service_type: str, layer_name: str) -> Dict[str, Any]:
+    async def get_layer_details(self, service_url: str, service_type: str, layer_name: str, strict_mode: bool = False) -> Dict[str, Any]:
         """获取图层详细信息
         
-        支持WMS、WFS和BOTH类型的图层
-        对于BOTH类型，优先尝试WMS，失败后尝试WFS
+        支持WMS和WFS类型的图层
+        如果指定的服务类型失败，会尝试另一种服务类型作为备选（除非启用严格模式）
         
         Args:
             service_url: 服务URL（标准化的基础URL）
-            service_type: 服务类型（WMS/WFS/BOTH）
+            service_type: 服务类型（WMS/WFS）
             layer_name: 图层名称
+            strict_mode: 严格模式，如果为True则不尝试备选服务类型
             
         Returns:
             图层详细信息字典
         """
-        if service_type.upper() == 'WMS':
-            return await self._get_wms_layer_details(service_url, layer_name)
-        elif service_type.upper() == 'WFS':
-            return await self._get_wfs_layer_details(service_url, layer_name)
-        elif service_type.upper() == 'BOTH':
-            # 优先尝试WMS
-            wms_error = None
-            wfs_error = None
-            
+        service_type_upper = service_type.upper()
+        
+        if service_type_upper == 'WMS':
             try:
                 return await self._get_wms_layer_details(service_url, layer_name)
-            except Exception as e:
-                wms_error = str(e)
-                logger.debug(f"WMS获取失败，尝试WFS: {e}")
+            except Exception as wms_error:
+                if strict_mode:
+                    # 严格模式：直接抛出错误，不尝试备选
+                    raise ValueError(f"图层 '{layer_name}' 不支持WMS服务: {wms_error}")
                 
-                # WMS失败，尝试WFS
+                logger.debug(f"WMS获取失败，尝试WFS作为备选: {wms_error}")
                 try:
-                    return await self._get_wfs_layer_details(service_url, layer_name)
-                except Exception as e:
-                    wfs_error = str(e)
-                    logger.debug(f"WFS获取也失败: {e}")
+                    wfs_details = await self._get_wfs_layer_details(service_url, layer_name)
+                    logger.info(f"图层 {layer_name} 实际支持WFS服务，而非WMS")
+                    return wfs_details
+                except Exception as wfs_error:
+                    logger.error(f"WMS和WFS都获取失败: WMS={wms_error}, WFS={wfs_error}")
+                    raise ValueError(f"图层 '{layer_name}' 不支持WMS服务: {wms_error}")
                     
-                    # 如果两种方式都失败，抛出详细错误
-                    if wms_error and wfs_error:
-                        logger.error(f"WMS和WFS都获取失败: WMS={wms_error}, WFS={wfs_error}")
-                        raise ValueError(f"无法从WMS或WFS获取图层详细信息: {layer_name}")
+        elif service_type_upper == 'WFS':
+            try:
+                return await self._get_wfs_layer_details(service_url, layer_name)
+            except Exception as wfs_error:
+                if strict_mode:
+                    # 严格模式：直接抛出错误，不尝试备选
+                    raise ValueError(f"图层 '{layer_name}' 不支持WFS服务: {wfs_error}")
+                
+                logger.debug(f"WFS获取失败，尝试WMS作为备选: {wfs_error}")
+                try:
+                    wms_details = await self._get_wms_layer_details(service_url, layer_name)
+                    logger.info(f"图层 {layer_name} 实际支持WMS服务，而非WFS")
+                    return wms_details
+                except Exception as wms_error:
+                    logger.error(f"WFS和WMS都获取失败: WFS={wfs_error}, WMS={wms_error}")
+                    raise ValueError(f"图层 '{layer_name}' 不支持WFS服务: {wfs_error}")
         else:
             raise ValueError(f"不支持的服务类型: {service_type}")
     
