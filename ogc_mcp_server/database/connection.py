@@ -60,23 +60,25 @@ class DatabaseManager:
                 logger.info("数据库连接已关闭")
     
     async def initialize_database(self):
-        """初始化数据库表结构
+        """初始化数据库
         
-        创建基础元数据表，不包含动态参数字段
+        公有方法，用于外部调用初始化数据库
         """
         conn = await self.connect()
+        await self._initialize_database(conn)
+    
+    async def _initialize_database(self, conn: aiosqlite.Connection):
+        """初始化数据库表结构
         
-        # 检查表是否存在
-        cursor = await conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='layer_resources';")
-        table_exists = await cursor.fetchone()
+        Args:
+            conn: 数据库连接
+        """
+        # 检查是否需要迁移表结构
+        cursor = await conn.execute("PRAGMA table_info(layer_resources)")
+        columns = await cursor.fetchall()
         
-        if table_exists:
-            # 检查表结构是否需要更新（去除crs和bbox字段）
-            cursor = await conn.execute("PRAGMA table_info(layer_resources);")
-            columns = await cursor.fetchall()
+        if columns:
             column_names = [col[1] for col in columns]
-            
-            # 如果存在crs或bbox字段，需要重建表
             if 'crs' in column_names or 'bbox' in column_names:
                 logger.info("检测到旧的表结构，正在更新为基础元数据表...")
                 await self._migrate_to_basic_metadata(conn)
@@ -87,7 +89,7 @@ class DatabaseManager:
             resource_id TEXT PRIMARY KEY,
             service_name TEXT NOT NULL,
             service_url TEXT NOT NULL,
-            service_type TEXT NOT NULL CHECK (service_type IN ('WMS', 'WFS')),
+            service_type TEXT NOT NULL CHECK (service_type IN ('WMS', 'WFS', 'WMTS')),
             layer_name TEXT NOT NULL,
             layer_title TEXT,
             layer_abstract TEXT,
@@ -145,13 +147,13 @@ class DatabaseManager:
             # 删除旧表
             await conn.execute("DROP TABLE layer_resources;")
             
-            # 创建新的基础元数据表（移除BOTH类型支持）
+            # 创建新的基础元数据表（添加WMTS类型支持）
             await conn.execute("""
                 CREATE TABLE layer_resources (
                     resource_id TEXT PRIMARY KEY,
                     service_name TEXT NOT NULL,
                     service_url TEXT NOT NULL,
-                    service_type TEXT NOT NULL CHECK (service_type IN ('WMS', 'WFS')),
+                    service_type TEXT NOT NULL CHECK (service_type IN ('WMS', 'WFS', 'WMTS')),
                     layer_name TEXT NOT NULL,
                     layer_title TEXT,
                     layer_abstract TEXT,
@@ -170,7 +172,7 @@ class DatabaseManager:
             # 删除临时表
             await conn.execute("DROP TABLE layer_resources_backup;")
             
-            logger.info("表结构迁移完成，已移除BOTH类型支持")
+            logger.info("表结构迁移完成，已添加WMTS类型支持")
             
         except Exception as e:
             logger.error(f"表结构迁移失败: {e}")

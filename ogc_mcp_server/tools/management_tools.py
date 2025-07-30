@@ -28,19 +28,19 @@ management_server = FastMCP(name="OGC图层管理")
 async def register_ogc_services(
     service_urls: Annotated[List[str], Field(description="OGC服务URL列表")],
     service_name: Annotated[Optional[str], Field(description="服务名称（可选，适用于所有服务）")] = None,
-    service_type: Annotated[Optional[str], Field(description="服务类型：WMS或WFS（可选，适用于所有服务）")] = None,
+    service_type: Annotated[Optional[str], Field(description="服务类型：WMS、WFS或WMTS（可选，适用于所有服务）")] = None,
     ctx: Context = None
 ) -> Dict[str, Any]:
     """批量注册OGC服务
     
     批量解析多个OGC服务的能力文档，提取图层信息并注册到资源列表中。
-    支持WMS和WFS服务的自动检测和解析。
+    支持WMS、WFS和WMTS服务的自动检测和解析。
     注册完成后，新图层将自动出现在ogc://layers资源中。
     
     Args:
         service_urls: OGC服务URL列表
         service_name: 服务名称（可选，适用于所有服务）
-        service_type: 服务类型，WMS或WFS（可选，适用于所有服务）
+        service_type: 服务类型，WMS、WFS或WMTS（可选，适用于所有服务）
         ctx: MCP上下文对象
         
     Returns:
@@ -61,16 +61,17 @@ async def register_ogc_services(
 
 @management_server.tool
 async def list_layers_from_resource(
-    service_type_filter: Annotated[Optional[str], Field(description="按服务类型筛选（WMS/WFS）")] = None,
+    service_type_filter: Annotated[Optional[str], Field(description="按服务类型筛选（WMS/WFS/WMTS）")] = None,
     ctx: Context = None
 ) -> Dict[str, Any]:
     """通过资源列出已注册的图层
     
     使用资源驱动的方式获取图层列表，从ogc://layers资源读取数据。
     这是推荐的获取图层列表的方式，确保数据一致性。
+    支持WMS、WFS和WMTS服务类型的筛选。
     
     Args:
-        service_type_filter: 按服务类型筛选（可选）
+        service_type_filter: 按服务类型筛选（WMS/WFS/WMTS，可选）
         ctx: MCP上下文对象
         
     Returns:

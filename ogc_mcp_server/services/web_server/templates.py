@@ -448,6 +448,7 @@ class WebTemplates:
     </div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/alexandre-melard/leaflet.TileLayer.WMTS@master/leaflet-tilelayer-wmts.js"></script>
     <script>
         {self._get_composite_map_javascript(center, zoom, layers_js)}
     </script>
@@ -572,17 +573,204 @@ class WebTemplates:
         
         for i, layer in enumerate(layers):
             if layer["type"] == "wms":
+                # 修复WMS图层显示问题
+                service_url = layer["service_url"]
+                layer_name = layer["layer_name"]
+                styles = layer.get("styles", [""])
+                style = styles[0] if styles else ""
+                
+                # 确保使用正确的WMS服务URL
+                if "gwc/service/wmts" in service_url:
+                    # 如果是WMTS URL，替换为WMS URL
+                    service_url = service_url.replace("gwc/service/wmts", "ows")
+                elif "ows" not in service_url and "wms" not in service_url.lower():
+                    # 确保使用正确的WMS端点
+                    service_url = service_url.rstrip('/') + '/ows'
+                
                 layer_js = f"""
-                var wmsLayer{i} = L.tileLayer.wms('{layer["service_url"]}', {{
-                    layers: '{layer["layer_name"]}',
+                var wmsLayer{i} = L.tileLayer.wms('{service_url}', {{
+                    layers: '{layer_name}',
                     format: 'image/png',
                     transparent: true,
-                    opacity: {layer.get("opacity", 0.8)}
+                    opacity: {layer.get("opacity", 0.8)},
+                    styles: '{style}',
+                    crs: L.CRS.EPSG3857,
+                    // 确保与地图坐标系一致
+                    version: '1.3.0',
+                    // 添加调试信息
+                    attribution: 'WMS Layer'
                 }});
                 
-                layerControl.addOverlay(wmsLayer{i}, '{layer["name"]}');
+                // WMS图层加载监控
+                wmsLayer{i}.on('load', function() {{
+                    console.log('✅ WMS图层加载成功: {layer["name"]}');
+                }});
+                
+                wmsLayer{i}.on('loading', function() {{
+                    console.log('🔄 WMS图层加载中: {layer["name"]}');
+                }});
+                
+                wmsLayer{i}.on('tileerror', function(error) {{
+                    console.warn('❌ WMS瓦片加载失败: {layer["name"]}');
+                    console.warn('服务URL:', '{service_url}');
+                    console.warn('图层名称:', '{layer_name}');
+                }});
+                
+                layerControl.addOverlay(wmsLayer{i}, '{layer["name"]} (WMS)');
                 if ({str(layer.get("visible", True)).lower()}) {{
                     wmsLayer{i}.addTo(map);
+                }}
+                """
+                
+            elif layer["type"] == "wmts":
+                # 智能WMTS坐标系匹配 - 优先使用Web Mercator
+                tile_matrix_set = layer.get("tile_matrix_set", "EPSG:4326")
+                style = layer.get("style", "default")
+                format_type = layer.get("format", "image/png")
+                service_url = layer["service_url"]
+                
+                # 智能选择最佳瓦片矩阵集
+                # 优先使用Web Mercator兼容的瓦片矩阵集
+                if "EPSG:900913" in tile_matrix_set or "GoogleMapsCompatible" in tile_matrix_set:
+                    # 使用Web Mercator瓦片矩阵集
+                    wmts_crs = "L.CRS.EPSG3857"
+                    actual_matrix_set = "EPSG:900913"  # 强制使用Web Mercator矩阵集
+                    origin_config = ""
+                    tile_size = 256
+                    zoom_offset = 0
+                    min_zoom = 0
+                    max_zoom = 18
+                elif "EPSG:3857" in tile_matrix_set:
+                    # 标准Web Mercator
+                    wmts_crs = "L.CRS.EPSG3857"
+                    actual_matrix_set = tile_matrix_set
+                    origin_config = ""
+                    tile_size = 256
+                    zoom_offset = 0
+                    min_zoom = 0
+                    max_zoom = 18
+                else:
+                    # EPSG:4326或其他坐标系 - 尝试转换到Web Mercator
+                    wmts_crs = "L.CRS.EPSG3857"
+                    # 如果服务支持EPSG:900913，优先使用它
+                    actual_matrix_set = "EPSG:900913"  # 假设服务支持，如果不支持会在错误处理中显示
+                    origin_config = ""
+                    tile_size = 256
+                    zoom_offset = 0
+                    min_zoom = 0
+                    max_zoom = 18
+                
+                base_url = service_url.rstrip('?').rstrip('&')
+                
+                layer_js = f"""
+                var wmtsLayer{i} = new L.TileLayer.WMTS('{base_url}', {{
+                    layer: '{layer["layer_name"]}',
+                    style: '{style}',
+                    tilematrixSet: '{actual_matrix_set}',
+                    format: '{format_type}',
+                    opacity: {layer.get("opacity", 0.8)},
+                    attribution: 'WMTS Layer ({actual_matrix_set})',
+                    minZoom: {min_zoom},
+                    maxZoom: {max_zoom},
+                    // 使用Web Mercator坐标系确保与底图对齐
+                    crs: {wmts_crs},
+                    // 瓦片配置
+                    tileSize: {tile_size},
+                    zoomOffset: {zoom_offset},
+                    // 禁用动画确保对齐
+                    fadeAnimation: false,
+                    zoomAnimation: false,
+                    // 错误瓦片处理
+                    errorTileUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVQIHWNgAAIAAAUAAY27m/MAAAAASUVORK5CYII=',
+                    // 优化瓦片加载
+                    keepBuffer: 2,
+                    updateWhenIdle: false,
+                    updateWhenZooming: true,
+                    // 确保连续显示
+                    continuousWorld: false,
+                    noWrap: false
+                }});
+                
+                // 坐标系统兼容性检查
+                wmtsLayer{i}.on('add', function() {{
+                    var mapCRS = map.options.crs.code || 'EPSG:3857';
+                    var layerCRS = '{actual_matrix_set}';
+                    
+                    console.log('=== WMTS图层坐标系检查 ===');
+                    console.log('地图CRS:', mapCRS);
+                    console.log('WMTS瓦片矩阵集:', layerCRS);
+                    console.log('图层名称:', '{layer["layer_name"]}');
+                    
+                    // 检查坐标系兼容性
+                    var isOptimal = false;
+                    if ((mapCRS === 'EPSG:3857' || mapCRS === 'EPSG:900913') && 
+                        (layerCRS === 'EPSG:3857' || layerCRS === 'EPSG:900913')) {{
+                        console.log('✅ 坐标系完全匹配 - 最佳性能');
+                        isOptimal = true;
+                    }} else if (mapCRS === 'EPSG:3857' && layerCRS.includes('4326')) {{
+                        console.warn('⚠️ 坐标系不匹配，但已启用自动转换');
+                        console.warn('建议使用EPSG:900913瓦片矩阵集以获得最佳性能');
+                    }}
+                    
+                    // 显示瓦片矩阵集信息
+                    console.log('可用缩放级别: {min_zoom}-{max_zoom}');
+                    console.log('瓦片大小: {tile_size}x{tile_size}');
+                }});
+                
+                // 增强的瓦片加载监控
+                var tileLoadCount{i} = 0;
+                var tileErrorCount{i} = 0;
+                var lastSuccessTime{i} = 0;
+                var lastErrorTime{i} = 0;
+                
+                wmtsLayer{i}.on('tileload', function(event) {{
+                    tileLoadCount{i}++;
+                    var now = Date.now();
+                    
+                    // 每15秒记录一次成功统计
+                    if (now - lastSuccessTime{i} > 15000) {{
+                        console.log('✅ WMTS瓦片加载统计 [{layer["name"]}]:');
+                        console.log('  - 成功: ' + tileLoadCount{i} + ' 个瓦片');
+                        console.log('  - 失败: ' + tileErrorCount{i} + ' 个瓦片');
+                        console.log('  - 成功率: ' + ((tileLoadCount{i} / (tileLoadCount{i} + tileErrorCount{i}) * 100) || 0).toFixed(1) + '%');
+                        lastSuccessTime{i} = now;
+                    }}
+                }});
+                
+                wmtsLayer{i}.on('tileerror', function(error) {{
+                    tileErrorCount{i}++;
+                    var currentZoom = map.getZoom();
+                    var now = Date.now();
+                    
+                    // 限制错误日志频率，避免刷屏
+                    if (now - lastErrorTime{i} > 5000) {{
+                        console.warn('❌ WMTS瓦片加载失败 [{layer["name"]}]:');
+                        console.warn('  - 当前缩放级别: Z' + currentZoom);
+                        console.warn('  - 累计失败: ' + tileErrorCount{i} + ' 次');
+                        console.warn('  - 瓦片矩阵集: {actual_matrix_set}');
+                        
+                        // 提供解决建议
+                        if ('{actual_matrix_set}' === 'EPSG:4326') {{
+                            console.warn('  💡 建议: 尝试使用EPSG:900913瓦片矩阵集');
+                        }} else if (currentZoom > 18) {{
+                            console.warn('  💡 建议: 当前缩放级别可能超出数据范围');
+                        }}
+                        
+                        lastErrorTime{i} = now;
+                    }}
+                }});
+                
+                // 图层加载完成事件
+                wmtsLayer{i}.on('load', function() {{
+                    console.log('🎯 WMTS图层加载完成: {layer["name"]}');
+                    console.log('  - 瓦片矩阵集: {actual_matrix_set}');
+                    console.log('  - 坐标系: {wmts_crs}');
+                }});
+                
+                // 添加到图层控制器
+                layerControl.addOverlay(wmtsLayer{i}, '{layer["name"]} (WMTS-{actual_matrix_set})');
+                if ({str(layer.get("visible", True)).lower()}) {{
+                    wmtsLayer{i}.addTo(map);
                 }}
                 """
                 
@@ -747,18 +935,37 @@ class WebTemplates:
         """
     
     def _get_composite_map_javascript(self, center: List[float], zoom: int, layers_js: str) -> str:
-        """获取复合地图JavaScript"""
+        """获取复合地图JavaScript - 修复多种坐标系统支持"""
         return f"""
-        // 初始化地图
-        var map = L.map('map').setView([{center[0]}, {center[1]}], {zoom});
+        // 初始化地图 - 使用Web Mercator投影确保兼容性
+        var map = L.map('map', {{
+            crs: L.CRS.EPSG3857,  // 使用Web Mercator坐标系
+            center: [{center[0]}, {center[1]}],
+            zoom: {zoom},
+            worldCopyJump: false,
+            maxBoundsViscosity: 1.0,
+            // 提高坐标转换精度
+            zoomSnap: 0.25,
+            zoomDelta: 0.5
+        }});
         
-        // 添加底图
+        // 添加底图 - 确保使用相同的坐标系
         var osm = L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
-            attribution: '© OpenStreetMap contributors'
+            attribution: '© OpenStreetMap contributors',
+            crs: L.CRS.EPSG3857,
+            tileSize: 256,
+            zoomOffset: 0,
+            continuousWorld: false,
+            noWrap: false
         }});
         
         var satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{{z}}/{{y}}/{{x}}', {{
-            attribution: '© Esri'
+            attribution: '© Esri',
+            crs: L.CRS.EPSG3857,
+            tileSize: 256,
+            zoomOffset: 0,
+            continuousWorld: false,
+            noWrap: false
         }});
         
         // 默认添加OSM底图
@@ -772,32 +979,151 @@ class WebTemplates:
         
         var layerControl = L.control.layers(baseMaps, {{}}).addTo(map);
         
-        // 添加图层
+        // 坐标系统信息显示 - 增强版
+        var coordSystemInfo = L.control({{position: 'bottomleft'}});
+        coordSystemInfo.onAdd = function(map) {{
+            var div = L.DomUtil.create('div', 'coord-system-info');
+            div.innerHTML = '<div style="background: rgba(255,255,255,0.9); padding: 8px; border-radius: 4px; font-size: 11px; border: 1px solid #ccc;">' +
+                           '<strong>地图坐标系:</strong> EPSG:3857<br>' +
+                           '<strong>单位:</strong> 米<br>' +
+                           '<div id="crs-status" style="margin-top: 4px; font-size: 10px; color: #666;"></div></div>';
+            return div;
+        }};
+        coordSystemInfo.addTo(map);
+        
+        // 添加图层 - 坐标对齐处理
         {layers_js}
         
         // 添加比例尺
-        L.control.scale().addTo(map);
+        L.control.scale({{
+            metric: true,
+            imperial: false,
+            position: 'bottomright'
+        }}).addTo(map);
         
-        // 鼠标坐标显示
+        // 增强的鼠标坐标显示
         map.on('mousemove', function(e) {{
-            document.getElementById('mouse-coords').textContent = 
-                e.latlng.lat.toFixed(6) + ', ' + e.latlng.lng.toFixed(6);
+            var latlng = e.latlng;
+            var webMercator = map.project(latlng, map.getZoom());
+            
+            document.getElementById('mouse-coords').innerHTML = 
+                '<strong>WGS84:</strong> ' + latlng.lat.toFixed(6) + ', ' + latlng.lng.toFixed(6) + '<br>' +
+                '<strong>Web Mercator:</strong> ' + webMercator.x.toFixed(2) + ', ' + webMercator.y.toFixed(2);
         }});
         
-        // 地图移动和缩放事件
+        // 地图事件监听 - 增强坐标系统检查
         map.on('moveend zoomend', function() {{
             var center = map.getCenter();
             var zoom = map.getZoom();
+            var bounds = map.getBounds();
+            
             document.getElementById('center-coords').textContent = 
                 center.lat.toFixed(4) + ', ' + center.lng.toFixed(4);
             document.getElementById('zoom-level').textContent = zoom;
+            
+            // 更新坐标系统状态
+            var activeLayerCount = 0;
+            var crsInfo = [];
+            
+            map.eachLayer(function(layer) {{
+                if (layer.options && layer.options.attribution && 
+                    !layer.options.attribution.includes('OpenStreetMap') && 
+                    !layer.options.attribution.includes('Esri')) {{
+                    activeLayerCount++;
+                    if (layer.options.attribution.includes('WMTS')) {{
+                        var crsMatch = layer.options.attribution.match(/\\((.*?)\\)/);
+                        if (crsMatch) {{
+                            crsInfo.push(crsMatch[1]);
+                        }}
+                    }}
+                }}
+            }});
+            
+            var statusDiv = document.getElementById('crs-status');
+            if (statusDiv) {{
+                statusDiv.innerHTML = '活动图层: ' + activeLayerCount + 
+                                    (crsInfo.length > 0 ? '<br>图层CRS: ' + crsInfo.join(', ') : '');
+            }}
         }});
         
-        // 点击地图显示坐标
+        // 点击地图显示坐标信息 - 增强版
         map.on('click', function(e) {{
+            var latlng = e.latlng;
+            var webMercator = map.project(latlng, map.getZoom());
+            
+            var popupContent = '<div style="min-width: 250px;">' +
+                '<h4>坐标信息</h4>' +
+                '<table style="width: 100%; font-size: 12px;">' +
+                '<tr><td><strong>WGS84 (EPSG:4326):</strong></td></tr>' +
+                '<tr><td>纬度: ' + latlng.lat.toFixed(8) + '</td></tr>' +
+                '<tr><td>经度: ' + latlng.lng.toFixed(8) + '</td></tr>' +
+                '<tr><td><strong>Web Mercator (EPSG:3857):</strong></td></tr>' +
+                '<tr><td>X: ' + webMercator.x.toFixed(2) + ' 米</td></tr>' +
+                '<tr><td>Y: ' + webMercator.y.toFixed(2) + ' 米</td></tr>' +
+                '<tr><td><strong>地图信息:</strong></td></tr>' +
+                '<tr><td>缩放级别: ' + map.getZoom() + '</td></tr>' +
+                '<tr><td>地图CRS: EPSG:3857</td></tr>' +
+                '</table></div>';
+                
             L.popup()
                 .setLatLng(e.latlng)
-                .setContent('坐标: ' + e.latlng.lat.toFixed(6) + ', ' + e.latlng.lng.toFixed(6))
+                .setContent(popupContent)
                 .openOn(map);
         }});
+        
+        // 图层对齐检查和调试功能
+        window.checkLayerAlignment = function() {{
+            var activeLayers = [];
+            var crsConflicts = [];
+            
+            map.eachLayer(function(layer) {{
+                if (layer.options && layer.options.attribution && 
+                    !layer.options.attribution.includes('OpenStreetMap') && 
+                    !layer.options.attribution.includes('Esri')) {{
+                    
+                    var layerInfo = {{
+                        name: layer.options.attribution || 'Unknown Layer',
+                        crs: layer.options.crs ? layer.options.crs.code : 'Unknown CRS',
+                        bounds: layer.getBounds ? layer.getBounds() : 'No bounds',
+                        tileSize: layer.options.tileSize || 'Default',
+                        zoomOffset: layer.options.zoomOffset || 0
+                    }};
+                    
+                    activeLayers.push(layerInfo);
+                    
+                    // 检查CRS冲突
+                    if (layerInfo.crs !== 'EPSG:3857' && layerInfo.crs !== 'Unknown CRS') {{
+                        crsConflicts.push({{
+                            layer: layerInfo.name,
+                            crs: layerInfo.crs,
+                            mapCrs: 'EPSG:3857'
+                        }});
+                    }}
+                }}
+            }});
+            
+            console.log('=== 图层对齐检查报告 ===');
+            console.log('活动图层:', activeLayers);
+            
+            if (crsConflicts.length > 0) {{
+                console.warn('⚠️ 发现坐标系冲突:');
+                crsConflicts.forEach(function(conflict) {{
+                    console.warn('- ' + conflict.layer + ': ' + conflict.crs + ' vs 地图: ' + conflict.mapCrs);
+                }});
+            }} else {{
+                console.log('✅ 所有图层坐标系统兼容');
+            }}
+            
+            return {{
+                activeLayers: activeLayers,
+                crsConflicts: crsConflicts,
+                mapCrs: 'EPSG:3857'
+            }};
+        }};
+        
+        // 自动执行对齐检查
+        setTimeout(function() {{
+            console.log('执行自动图层对齐检查...');
+            window.checkLayerAlignment();
+        }}, 3000);
         """

@@ -549,6 +549,8 @@ class CompositeHandler:
         
         if layer_type == "wms":
             return self._process_wms_layer(layer_config)
+        elif layer_type == "wmts":
+            return self._process_wmts_layer(layer_config)
         elif layer_type == "wfs":
             # WFS图层包含GeoJSON数据，按GeoJSON方式处理
             return self._process_wfs_layer(layer_config)
@@ -583,6 +585,51 @@ class CompositeHandler:
             "bbox": layer_info.get("bbox"),
             "style": style,
             "layer_info": layer_info
+        }
+
+    def _process_wmts_layer(self, layer_config: Dict[str, Any]) -> Dict[str, Any]:
+        """处理WMTS图层配置
+        
+        Args:
+            layer_config: WMTS图层配置
+            
+        Returns:
+            处理后的WMTS图层数据
+        """
+        layer_info = layer_config.get("layer_info", {})
+        service_url = layer_config.get("wmts_url", layer_info.get("service_url", ""))
+        
+        # 确保service_url是WMTS服务的基础URL，不包含具体的GetTile参数
+        # 如果URL已经包含GetTile参数，提取基础URL
+        if "REQUEST=GetTile" in service_url:
+            # 提取基础URL（去除GetTile相关参数）
+            if "?" in service_url:
+                base_url = service_url.split("?")[0]
+                # 保留SERVICE=WMTS参数（如果存在）
+                if "SERVICE=WMTS" in service_url:
+                    service_url = f"{base_url}?SERVICE=WMTS"
+                else:
+                    service_url = base_url
+        
+        return {
+            "type": "wmts",
+            "name": layer_config.get("name", layer_info.get("layer_name", "WMTS图层")),
+            "title": layer_config.get("title", layer_info.get("layer_title", "")),
+            "service_url": service_url,
+            "layer_name": layer_info.get("layer_name", ""),
+            # 正确传递WMTS特有参数
+            "tile_matrix_set": layer_config.get("tile_matrix_set", "EPSG:4326"),
+            "style": layer_config.get("style", "default"),
+            "format": layer_config.get("format", "image/png"),
+            "opacity": layer_config.get("opacity", 0.8),
+            "visible": layer_config.get("visible", True),
+            "crs": layer_info.get("crs", "EPSG:4326"),
+            "bbox": layer_config.get("bbox", layer_info.get("bbox")),
+            "layer_info": layer_info,
+            # 传递增强信息
+            "available_matrix_sets": layer_config.get("available_matrix_sets", []),
+            "available_styles": layer_config.get("available_styles", []),
+            "available_formats": layer_config.get("available_formats", [])
         }
 
     def _process_wfs_layer(self, layer_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -638,7 +685,7 @@ class CompositeHandler:
         has_bounds = False
         
         for layer in layers:
-            if layer["type"] == "wms" and layer.get("bbox"):
+            if layer["type"] in ["wms", "wmts"] and layer.get("bbox"):
                 bbox = layer["bbox"]
                 if len(bbox) == 4:
                     bounds["west"] = min(bounds["west"], bbox[0])

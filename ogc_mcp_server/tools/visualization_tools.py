@@ -7,6 +7,7 @@
 工具设计：
 - add_wms_layer: 添加WMS图层到可视化
 - add_wfs_layer: 添加WFS图层到可视化（支持属性过滤）
+- add_wmts_layer: 添加WMTS图层到可视化（支持瓦片矩阵集选择）
 - create_composite_visualization: 创建多图层复合可视化
 - clear_visualization_layers: 清空当前图层列表
 """
@@ -484,13 +485,27 @@ async def _fetch_optimized_wfs_data(
     filter_info: Dict[str, Any],
     ctx: Context
 ) -> Dict[str, Any]:
-    """优化的WFS数据获取
+    """优化的WFS数据获取 - 修复URL使用错误
     
     利用资源中的边界框信息和过滤器优化请求
     """
     basic_info = layer_info["basic_info"]
     wfs_params = layer_info["access_parameters"]["wfs"]
     enhanced_details = layer_info.get("enhanced_details", {})
+    
+    # 修复：使用正确的WFS服务URL
+    wfs_service_url = wfs_params.get("service_url") or basic_info.get("wfs_service_url")
+    if not wfs_service_url:
+        # 如果没有专门的WFS URL，从基础URL构建
+        base_url = basic_info["service_url"]
+        if "gwc/service/wmts" in base_url:
+            # 如果是WMTS URL，替换为WFS URL
+            wfs_service_url = base_url.replace("gwc/service/wmts", "ows")
+        elif "ows" not in base_url:
+            # 确保使用OWS端点
+            wfs_service_url = base_url.rstrip('/') + '/ows'
+        else:
+            wfs_service_url = base_url
     
     # 构建优化的请求参数
     params = {
@@ -518,14 +533,19 @@ async def _fetch_optimized_wfs_data(
             await ctx.info(f"使用动态边界框优化WFS查询: {bbox_str}")
     
     if ctx:
-        await ctx.info(f"正在获取WFS数据，最大要素数: {max_features}")
+        await ctx.info(f"正在获取WFS数据，服务URL: {wfs_service_url}")
+        await ctx.info(f"请求参数: {params}")
     
-    # 发送请求 - 修复HTTP客户端访问
+    # 发送请求 - 使用正确的WFS URL
     parser = await get_ogc_parser()
-    response = await parser.url_utils.http_client.get(basic_info["service_url"], params=params)
+    response = await parser.url_utils.http_client.get(wfs_service_url, params=params)
     
     if response.status_code != 200:
-        raise RuntimeError(f"WFS请求失败: {response.status_code}")
+        error_msg = f"WFS请求失败: {response.status_code}"
+        if ctx:
+            await ctx.error(f"{error_msg}, URL: {wfs_service_url}")
+            await ctx.error(f"响应内容: {response.text[:500]}")
+        raise RuntimeError(error_msg)
     
     geojson_data = response.json()
     
@@ -677,6 +697,17 @@ def _create_enhanced_layer_summary(layer: Dict[str, Any]) -> Dict[str, Any]:
             "styles_count": len(layer.get("styles", [])),
             "crs_count": len(layer.get("crs_list", []))
         })
+    elif layer["type"] == "wmts":
+        summary.update({
+            "tile_matrix_set": layer.get("tile_matrix_set"),
+            "style": layer.get("style"),
+            "format": layer.get("format"),
+            "zoom_level": layer.get("zoom_level"),
+            "matrix_sets_count": len(layer.get("available_matrix_sets", [])),
+            "styles_count": len(layer.get("available_styles", [])),
+            "formats_count": len(layer.get("available_formats", [])),
+            "has_dimensions": bool(layer.get("dimensions"))
+        })
     
     return summary
 
@@ -803,6 +834,7 @@ def _get_visualization_enhanced_features(layers: List[Dict[str, Any]]) -> Dict[s
         "total_layers": len(layers),
         "wms_layers": len([l for l in layers if l.get("type") == "wms"]),
         "wfs_layers": len([l for l in layers if l.get("type") == "wfs"]),
+        "wmts_layers": len([l for l in layers if l.get("type") == "wmts"]),
         "dynamic_bbox_layers": len([l for l in layers if l.get("dynamic_bbox")]),
         "feature_schema_layers": len([l for l in layers if l.get("feature_schema")]),
         "total_features": sum(
@@ -813,5 +845,185 @@ def _get_visualization_enhanced_features(layers: List[Dict[str, Any]]) -> Dict[s
             geom_type
             for layer in layers if layer.get("type") == "wfs"
             for geom_type in layer.get("stats", {}).get("geometry_types", [])
+        )),
+        "unique_tile_matrix_sets": list(set(
+            layer.get("tile_matrix_set")
+            for layer in layers if layer.get("type") == "wmts" and layer.get("tile_matrix_set")
         ))
     }
+
+
+@visualization_server.tool
+async def add_wmts_layer(
+    layer_name: Annotated[str, Field(description="WMTS图层名称")],
+    layer_title: Annotated[str, Field(description="图层显示标题")] = None,
+    tile_matrix_set: Annotated[str, Field(description="瓦片矩阵集标识符")] = None,
+    style: Annotated[str, Field(description="样式标识符")] = None,
+    format: Annotated[str, Field(description="图像格式")] = None,
+    zoom_level: Annotated[int, Field(description="初始缩放级别")] = 10,
+    ctx: Context = None
+) -> Dict[str, Any]:
+    """添加WMTS图层到可视化列表
+    
+    专门用于添加WMTS（瓦片地图）图层，适合：
+    - 高性能瓦片底图
+    - 预渲染的地图数据
+    - 多尺度地图可视化
+    - 缓存优化的地图服务
+    
+    Args:
+        layer_name: WMTS图层名称
+        layer_title: 图层显示标题（可选，默认使用图层名称）
+        tile_matrix_set: 瓦片矩阵集标识符（可选，自动选择最佳）
+        style: 样式标识符（可选，使用默认样式）
+        format: 图像格式（可选，使用默认格式）
+        zoom_level: 初始缩放级别（默认10）
+        ctx: MCP上下文对象
+        
+    Returns:
+        添加结果和当前图层列表状态
+    """
+    try:
+        if ctx:
+            await ctx.info(f"正在添加WMTS图层: {layer_name}")
+        
+        # 获取图层信息（利用layer_registry资源）
+        layer_info = await _get_layer_from_resource(layer_name, ctx)
+        
+        # 验证图层支持WMTS
+        if not layer_info["access_parameters"].get("wmts"):
+            raise ValueError(f"图层 {layer_name} 不支持WMTS服务")
+        
+        # 创建WMTS图层对象（利用资源中的增强信息）
+        wmts_layer = _create_wmts_layer_from_resource(
+            layer_info, 
+            layer_title or layer_name,
+            tile_matrix_set,
+            style,
+            format,
+            zoom_level
+        )
+        
+        # 添加到图层列表
+        _current_layers.append(wmts_layer)
+        
+        if ctx:
+            await ctx.info(f"✅ WMTS图层 {layer_name} 添加成功，当前共 {len(_current_layers)} 个图层")
+        
+        return {
+            "success": True,
+            "layer_added": {
+                "name": layer_name,
+                "title": wmts_layer["title"],
+                "type": "wmts",
+                "tile_matrix_set": wmts_layer.get("tile_matrix_set"),
+                "style": wmts_layer.get("style"),
+                "format": wmts_layer.get("format"),
+                "zoom_level": wmts_layer.get("zoom_level"),
+                "has_dynamic_bbox": bool(wmts_layer.get("dynamic_bbox")),
+                "bbox_source": wmts_layer.get("bbox_source", "static"),
+                "available_matrix_sets": len(wmts_layer.get("available_matrix_sets", [])),
+                "available_styles": len(wmts_layer.get("available_styles", [])),
+                "available_formats": len(wmts_layer.get("available_formats", []))
+            },
+            "current_layer_count": len(_current_layers),
+            "message": f"WMTS图层 {layer_name} 已添加到可视化列表"
+        }
+        
+    except Exception as e:
+        error_msg = f"添加WMTS图层失败: {e}"
+        logger.error(error_msg)
+        if ctx:
+            await ctx.error(error_msg)
+        raise
+
+
+def _create_wmts_layer_from_resource(
+    layer_info: Dict[str, Any], 
+    title: str,
+    tile_matrix_set: Optional[str] = None,
+    style: Optional[str] = None,
+    format: Optional[str] = None,
+    zoom_level: int = 10
+) -> Dict[str, Any]:
+    """从资源信息创建WMTS图层对象
+    
+    充分利用layer_registry提供的WMTS增强信息
+    
+    Args:
+        layer_info: 图层信息
+        title: 图层标题
+        tile_matrix_set: 指定的瓦片矩阵集
+        style: 指定的样式
+        format: 指定的格式
+        zoom_level: 缩放级别
+        
+    Returns:
+        WMTS图层对象
+    """
+    basic_info = layer_info["basic_info"]
+    wmts_params = layer_info["access_parameters"]["wmts"]
+    detailed_capabilities = layer_info.get("detailed_capabilities", {}).get("wmts", {})
+    capabilities = layer_info.get("capabilities", {})
+    
+    # 获取可用的瓦片矩阵集、样式和格式
+    available_matrix_sets = wmts_params.get("tile_matrix_sets", [])
+    available_styles = wmts_params.get("styles", [])
+    available_formats = wmts_params.get("formats", ["image/png"])
+    
+    # 智能选择瓦片矩阵集
+    selected_matrix_set = tile_matrix_set
+    if not selected_matrix_set:
+        selected_matrix_set = wmts_params.get("tilematrixset", "")
+        if not selected_matrix_set and available_matrix_sets:
+            # 优先选择常见的瓦片矩阵集
+            for preferred in ["GoogleMapsCompatible", "EPSG:3857", "EPSG:4326"]:
+                if preferred in available_matrix_sets:
+                    selected_matrix_set = preferred
+                    break
+            if not selected_matrix_set:
+                selected_matrix_set = available_matrix_sets[0]
+    
+    # 智能选择样式
+    selected_style = style
+    if not selected_style:
+        selected_style = wmts_params.get("default_style", "")
+        if not selected_style and available_styles:
+            selected_style = available_styles[0]
+    
+    # 智能选择格式
+    selected_format = format
+    if not selected_format:
+        selected_format = wmts_params.get("default_format", "image/png")
+        if selected_format not in available_formats and available_formats:
+            selected_format = available_formats[0]
+    
+    # 构建增强的WMTS图层对象
+    wmts_layer = {
+        "name": basic_info["layer_name"],
+        "title": title,
+        "type": "wmts",
+        "service_type": basic_info["service_type"],
+        "layer_info": basic_info,
+        "wmts_url": basic_info["service_url"],
+        "wmts_params": wmts_params,
+        # WMTS特有参数
+        "tile_matrix_set": selected_matrix_set,
+        "style": selected_style,
+        "format": selected_format,
+        "zoom_level": zoom_level,
+        # 可用选项
+        "available_matrix_sets": available_matrix_sets,
+        "available_styles": available_styles,
+        "available_formats": available_formats,
+        # 增强信息
+        "bbox": capabilities.get("bbox"),
+        "dynamic_bbox": detailed_capabilities.get("dynamic_bbox"),
+        "bbox_source": "dynamic" if detailed_capabilities.get("dynamic_bbox") else "static",
+        "crs_list": capabilities.get("crs_list", ["EPSG:4326"]),
+        "dimensions": wmts_params.get("dimensions", {}),
+        "resource_urls": wmts_params.get("resource_urls", {}),
+        "wmts_specific": detailed_capabilities.get("wmts_specific", {})
+    }
+    
+    return wmts_layer

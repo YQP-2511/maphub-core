@@ -1,7 +1,7 @@
 """
 OGC服务解析器模块
 
-负责解析WMS和WFS服务的Capabilities文档，提取图层信息
+负责解析WMS、WFS和WMTS服务的Capabilities文档，提取图层信息
 """
 
 import logging
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 class OGCServiceParser:
     """OGC服务解析器
     
-    负责解析WMS和WFS服务的能力文档，提取图层信息
+    负责解析WMS、WFS和WMTS服务的能力文档，提取图层信息
     """
     
     def __init__(self, timeout: int = 30):
@@ -138,6 +138,10 @@ class OGCServiceParser:
         """解析WFS服务"""
         return await self.capabilities_parser.parse_wfs_service(url, service_name)
     
+    async def parse_wmts_service(self, url: str, service_name: str = None):
+        """解析WMTS服务"""
+        return await self.capabilities_parser.parse_wmts_service(url, service_name)
+    
     async def parse_ogc_service(self, url: str, service_type: str = None, service_name: str = None):
         """解析OGC服务（自动检测服务类型或指定类型）"""
         if service_type:
@@ -146,6 +150,8 @@ class OGCServiceParser:
                 return await self.parse_wms_service(url, service_name)
             elif service_type == 'WFS':
                 return await self.parse_wfs_service(url, service_name)
+            elif service_type == 'WMTS':
+                return await self.parse_wmts_service(url, service_name)
             else:
                 raise ValueError(f"不支持的服务类型: {service_type}")
         
