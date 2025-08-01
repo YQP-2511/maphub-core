@@ -14,8 +14,7 @@ from .services.web_server.server import get_web_server, stop_web_server
 
 # 导入子服务器模块
 from .tools.management_tools import management_server
-from .tools.wms_tools import wms_server  
-from .tools.wfs_tools import wfs_server
+
 from .tools.visualization_tools import visualization_server
 from .resources.layer_registry import layer_registry_server
 from .prompts.workflow_prompts import workflow_prompts_server
@@ -83,8 +82,7 @@ async def lifespan(app):
             try:
                 # 导入各个子服务器的组件（异步操作）
                 await app.import_server(management_server, prefix="mgmt")        # 管理工具
-                await app.import_server(wms_server, prefix="wms")               # WMS工具
-                await app.import_server(wfs_server, prefix="wfs")               # WFS工具
+
                 await app.import_server(visualization_server, prefix="viz")     # 通用可视化工具
                 await app.import_server(workflow_prompts_server, prefix="workflow")  # 工作流提示词
                 await app.import_server(layer_registry_server)                 # 图层注册表资源（无前缀）

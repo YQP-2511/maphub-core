@@ -354,34 +354,64 @@ async def _build_wfs_filters(
             parser = await get_ogc_parser()
             builder = parser.create_filter_builder()
             
+            # 按属性名分组过滤条件
+            property_groups = {}
             for filter_condition in property_filters:
                 property_name = filter_condition.get("property")
                 value = filter_condition.get("value")
                 operator = filter_condition.get("operator", "=")
                 
-                # 映射操作符
-                operator_map = {
-                    "=": "PropertyIsEqualTo",
-                    "!=": "PropertyIsNotEqualTo",
-                    ">": "PropertyIsGreaterThan",
-                    ">=": "PropertyIsGreaterThanOrEqualTo",
-                    "<": "PropertyIsLessThan",
-                    "<=": "PropertyIsLessThanOrEqualTo",
-                    "LIKE": "PropertyIsLike"
-                }
+                if property_name not in property_groups:
+                    property_groups[property_name] = []
                 
-                ogc_operator = operator_map.get(operator, "PropertyIsEqualTo")
-                
-                if operator == "LIKE":
-                    builder.add_like_filter(property_name, value)
-                else:
-                    builder.add_property_filter(property_name, value, ogc_operator)
+                property_groups[property_name].append({
+                    "value": value,
+                    "operator": operator
+                })
                 
                 filter_info["applied_filters"].append({
                     "property": property_name,
                     "value": value,
                     "operator": operator
                 })
+            
+            # 为每个属性组构建过滤器
+            for property_name, conditions in property_groups.items():
+                # 如果同一属性有多个等值条件，合并为IN操作
+                equal_values = []
+                other_conditions = []
+                
+                for condition in conditions:
+                    if condition["operator"] == "=":
+                        equal_values.append(condition["value"])
+                    else:
+                        other_conditions.append(condition)
+                
+                # 处理等值条件
+                if equal_values:
+                    if len(equal_values) == 1:
+                        builder.add_property_filter(property_name, equal_values[0], "PropertyIsEqualTo")
+                    else:
+                        # 多个值使用IN操作
+                        builder.add_property_filter(property_name, equal_values, "PropertyIsEqualTo")
+                
+                # 处理其他条件
+                for condition in other_conditions:
+                    operator_map = {
+                        "!=": "PropertyIsNotEqualTo",
+                        ">" : "PropertyIsGreaterThan",
+                        ">=": "PropertyIsGreaterThanOrEqualTo",
+                        "<": "PropertyIsLessThan",
+                        "<=": "PropertyIsLessThanOrEqualTo",
+                        "LIKE": "PropertyIsLike"
+                    }
+                    
+                    ogc_operator = operator_map.get(condition["operator"], "PropertyIsEqualTo")
+                    
+                    if condition["operator"] == "LIKE":
+                        builder.add_like_filter(property_name, condition["value"])
+                    else:
+                        builder.add_property_filter(property_name, condition["value"], ogc_operator)
             
             # 构建CQL过滤器
             cql_filter = builder.build_cql_filter()
@@ -715,7 +745,8 @@ def _create_enhanced_layer_summary(layer: Dict[str, Any]) -> Dict[str, Any]:
 def _configure_enhanced_map_settings(layers: List[Dict[str, Any]], auto_fit_bounds: bool = True) -> Dict[str, Any]:
     """配置增强的地图设置
     
-    利用动态边界框信息自动优化地图显示
+    集成智能中心点计算，自动识别主要图层并优化地图显示
+    解决多图层叠加时中心点计算不能区分主次的问题
     """
     map_config = {
         "width": 1200,
@@ -725,43 +756,177 @@ def _configure_enhanced_map_settings(layers: List[Dict[str, Any]], auto_fit_boun
     }
     
     if auto_fit_bounds and layers:
-        # 尝试从动态边界框计算最佳视图
-        dynamic_bboxes = []
-        static_bboxes = []
-        
-        for layer in layers:
-            dynamic_bbox = layer.get("dynamic_bbox")
-            if dynamic_bbox and dynamic_bbox.get("bbox"):
-                dynamic_bboxes.append(dynamic_bbox["bbox"])
-            elif layer.get("bbox") and layer["bbox"].get("wgs84"):
-                static_bboxes.append(layer["bbox"]["wgs84"])
-        
-        # 优先使用动态边界框
-        bboxes_to_use = dynamic_bboxes if dynamic_bboxes else static_bboxes
-        
-        if bboxes_to_use:
-            # 计算合并边界框
-            combined_bbox = _calculate_combined_bbox(bboxes_to_use)
-            if combined_bbox:
-                center_lon = (combined_bbox[0] + combined_bbox[2]) / 2
-                center_lat = (combined_bbox[1] + combined_bbox[3]) / 2
-                map_config["center"] = [center_lat, center_lon]
+        try:
+            # 使用智能中心点计算逻辑
+            intelligent_center = _calculate_intelligent_center_for_visualization(layers)
+            
+            if intelligent_center:
+                map_config["center"] = [intelligent_center["center"][1], intelligent_center["center"][0]]  # [lat, lon]
+                map_config["zoom"] = intelligent_center["zoom_level"]
                 
-                # 根据边界框大小调整缩放级别
-                bbox_width = abs(combined_bbox[2] - combined_bbox[0])
-                bbox_height = abs(combined_bbox[3] - combined_bbox[1])
-                max_extent = max(bbox_width, bbox_height)
+                # 添加智能分析信息到配置中
+                map_config["intelligent_analysis"] = {
+                    "primary_layers_count": intelligent_center.get("primary_layers_count", 0),
+                    "bbox_area": intelligent_center.get("bbox_area", 0),
+                    "has_vector_data": intelligent_center.get("has_vector_data", False),
+                    "analysis_summary": intelligent_center.get("summary", "智能中心点计算")
+                }
+            else:
+                # 回退到原有的简单计算方式
+                _apply_fallback_bbox_calculation(layers, map_config)
                 
-                if max_extent > 10:
-                    map_config["zoom"] = 6
-                elif max_extent > 1:
-                    map_config["zoom"] = 8
-                elif max_extent > 0.1:
-                    map_config["zoom"] = 10
-                else:
-                    map_config["zoom"] = 12
+        except Exception as e:
+            logger.warning(f"智能中心点计算失败，使用回退方案: {e}")
+            # 回退到原有的简单计算方式
+            _apply_fallback_bbox_calculation(layers, map_config)
     
     return map_config
+
+
+def _calculate_intelligent_center_for_visualization(layers: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """为可视化计算智能中心点
+    
+    集成了图层重要性分析和智能中心点计算的核心逻辑
+    """
+    if not layers:
+        return None
+    
+    # 分析图层重要性
+    layer_analysis = _analyze_layer_importance(
+        layers, 
+        target_hint=None,  # 可视化时不需要特定提示
+        exclude_global=True,  # 排除全球图层
+        prefer_vector=True   # 优先矢量数据
+    )
+    
+    # 确定主要目标图层
+    primary_layers = layer_analysis["primary_layers"]
+    if not primary_layers:
+        primary_layers = layers  # 如果没有主要图层，使用所有图层
+    
+    # 收集有效的边界框
+    valid_bboxes = []
+    bbox_weights = []
+    
+    for layer in primary_layers:
+        # 优先使用动态边界框
+        bbox = layer.get("dynamic_bbox")
+        if bbox and isinstance(bbox, dict):
+            bbox = bbox.get("bbox")
+        
+        # 如果没有动态边界框，尝试静态边界框
+        if not bbox or len(bbox) < 4:
+            static_bbox = layer.get("bbox")
+            if static_bbox and isinstance(static_bbox, dict):
+                bbox = static_bbox.get("wgs84")
+        
+        # 验证边界框有效性
+        if bbox and len(bbox) >= 4:
+            # 检查边界框是否为有效的地理坐标范围
+            if (bbox[0] >= -180 and bbox[2] <= 180 and 
+                bbox[1] >= -90 and bbox[3] <= 90 and
+                bbox[0] < bbox[2] and bbox[1] < bbox[3]):
+                valid_bboxes.append(bbox)
+                
+                # 计算权重（矢量数据权重更高）
+                weight = 1.0
+                if layer.get("type") == "wfs":
+                    weight = 2.0
+                if layer.get("dynamic_bbox"):
+                    weight *= 1.5
+                
+                bbox_weights.append(weight)
+    
+    if not valid_bboxes:
+        return None  # 没有有效边界框，返回None使用回退方案
+    
+    # 计算加权合并边界框
+    combined_bbox = _calculate_weighted_combined_bbox(valid_bboxes, bbox_weights)
+    
+    # 计算中心点
+    center_lon = (combined_bbox[0] + combined_bbox[2]) / 2
+    center_lat = (combined_bbox[1] + combined_bbox[3]) / 2
+    
+    # 计算智能缩放级别
+    bbox_width = abs(combined_bbox[2] - combined_bbox[0])
+    bbox_height = abs(combined_bbox[3] - combined_bbox[1])
+    bbox_area = bbox_width * bbox_height
+    
+    # 基于边界框大小的智能缩放级别
+    if bbox_area < 0.001:  # 非常小的区域（建筑级别）
+        zoom_level = 18
+    elif bbox_area < 0.01:  # 小区域（街区级别）
+        zoom_level = 15
+    elif bbox_area < 0.1:  # 中小区域（城市级别）
+        zoom_level = 12
+    elif bbox_area < 1:  # 中等区域（县级）
+        zoom_level = 10
+    elif bbox_area < 10:  # 大区域（州级）
+        zoom_level = 8
+    elif bbox_area < 100:  # 很大区域（国家级）
+        zoom_level = 6
+    else:  # 超大区域
+        zoom_level = 4
+    
+    # 根据图层类型微调缩放级别
+    has_vector_data = any(layer.get("type") == "wfs" for layer in primary_layers)
+    if has_vector_data:
+        zoom_level = min(zoom_level + 1, 18)  # 矢量数据可以放大一级
+    
+    return {
+        "center": [center_lon, center_lat],
+        "zoom_level": zoom_level,
+        "bbox": combined_bbox,
+        "bbox_area": bbox_area,
+        "primary_layers_count": len(primary_layers),
+        "has_vector_data": has_vector_data,
+        "summary": f"基于{len(primary_layers)}个主要图层的智能中心点"
+    }
+
+
+def _apply_fallback_bbox_calculation(layers: List[Dict[str, Any]], map_config: Dict[str, Any]) -> None:
+    """应用回退的边界框计算方式
+    
+    当智能计算失败时使用的简单边界框合并方法
+    """
+    # 尝试从动态边界框计算最佳视图
+    dynamic_bboxes = []
+    static_bboxes = []
+    
+    for layer in layers:
+        dynamic_bbox = layer.get("dynamic_bbox")
+        if dynamic_bbox and dynamic_bbox.get("bbox"):
+            dynamic_bboxes.append(dynamic_bbox["bbox"])
+        elif layer.get("bbox") and layer["bbox"].get("wgs84"):
+            static_bboxes.append(layer["bbox"]["wgs84"])
+    
+    # 优先使用动态边界框
+    bboxes_to_use = dynamic_bboxes if dynamic_bboxes else static_bboxes
+    
+    if bboxes_to_use:
+        # 计算合并边界框
+        combined_bbox = _calculate_combined_bbox(bboxes_to_use)
+        if combined_bbox:
+            center_lon = (combined_bbox[0] + combined_bbox[2]) / 2
+            center_lat = (combined_bbox[1] + combined_bbox[3]) / 2
+            map_config["center"] = [center_lat, center_lon]
+            
+            # 根据边界框大小调整缩放级别
+            bbox_width = abs(combined_bbox[2] - combined_bbox[0])
+            bbox_height = abs(combined_bbox[3] - combined_bbox[1])
+            max_extent = max(bbox_width, bbox_height)
+            
+            if max_extent > 10:
+                map_config["zoom"] = 6
+            elif max_extent > 1:
+                map_config["zoom"] = 8
+            elif max_extent > 0.1:
+                map_config["zoom"] = 10
+            else:
+                map_config["zoom"] = 12
+            
+            # 标记为回退计算
+            map_config["fallback_calculation"] = True
 
 
 def _calculate_combined_bbox(bboxes: List[List[float]]) -> Optional[List[float]]:
@@ -851,6 +1016,9 @@ def _get_visualization_enhanced_features(layers: List[Dict[str, Any]]) -> Dict[s
             for layer in layers if layer.get("type") == "wmts" and layer.get("tile_matrix_set")
         ))
     }
+
+
+
 
 
 @visualization_server.tool
@@ -1027,3 +1195,384 @@ def _create_wmts_layer_from_resource(
     }
     
     return wmts_layer
+
+
+def _analyze_layer_importance(
+    layers: List[Dict[str, Any]], 
+    target_hint: Optional[str] = None,
+    exclude_global: bool = True,
+    prefer_vector: bool = True
+) -> Dict[str, Any]:
+    """分析图层重要性，识别主要目标图层
+    
+    Args:
+        layers: 图层列表
+        target_hint: 目标图层提示
+        exclude_global: 是否排除全球图层
+        prefer_vector: 是否优先矢量数据
+        
+    Returns:
+        图层分析结果
+    """
+    primary_layers = []
+    excluded_layers = []
+    analysis_scores = []
+    
+    for layer in layers:
+        score = 0
+        reasons = []
+        
+        # 基础分数：所有图层都有基础分数
+        score += 10
+        reasons.append("基础图层")
+        
+        # 图层类型评分
+        layer_type = layer.get("type", "")
+        if layer_type == "wfs" and prefer_vector:
+            score += 30
+            reasons.append("矢量数据优先")
+        elif layer_type == "wms":
+            score += 15
+            reasons.append("栅格图层")
+        elif layer_type == "wmts":
+            score += 5
+            reasons.append("瓦片底图")
+        
+        # 边界框大小评分（较小的边界框得分更高，表示更具体的区域）
+        bbox = None
+        
+        # 优先获取动态边界框
+        dynamic_bbox = layer.get("dynamic_bbox")
+        if dynamic_bbox and isinstance(dynamic_bbox, dict):
+            bbox = dynamic_bbox.get("bbox")
+        
+        # 如果没有动态边界框，尝试静态边界框
+        if not bbox:
+            static_bbox = layer.get("bbox")
+            if static_bbox and isinstance(static_bbox, dict):
+                bbox = static_bbox.get("wgs84")
+            elif isinstance(static_bbox, list) and len(static_bbox) >= 4:
+                bbox = static_bbox
+        
+        if bbox and len(bbox) >= 4:
+            try:
+                bbox_area = abs((bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
+                if bbox_area < 1:  # 小于1度的区域
+                    score += 25
+                    reasons.append("小范围区域")
+                elif bbox_area < 100:  # 小于100度的区域
+                    score += 15
+                    reasons.append("中等范围区域")
+                elif bbox_area > 10000 and exclude_global:  # 大于10000度的区域（接近全球）
+                    score -= 20
+                    reasons.append("全球范围图层")
+            except (TypeError, IndexError):
+                # 边界框格式错误，跳过评分
+                reasons.append("边界框格式异常")
+        
+        # 要素数量评分（有具体要素的图层更重要）
+        feature_count = len(layer.get("geojson_data", {}).get("features", []))
+        if feature_count > 0:
+            score += min(feature_count * 2, 20)  # 最多加20分
+            reasons.append(f"包含{feature_count}个要素")
+        
+        # 目标提示匹配
+        if target_hint:
+            layer_name = layer.get("name", "").lower()
+            layer_title = layer.get("title", "").lower()
+            hint_lower = target_hint.lower()
+            
+            if (hint_lower in layer_name or hint_lower in layer_title or
+                any(keyword in layer_name or keyword in layer_title 
+                    for keyword in ["vector", "矢量", "state", "州", "city", "城市", "region", "区域"])):
+                score += 20
+                reasons.append("匹配目标提示")
+        
+        # 动态边界框加分（更准确的边界信息）
+        if layer.get("dynamic_bbox"):
+            score += 10
+            reasons.append("动态边界框")
+        
+        analysis_scores.append({
+            "layer": layer,
+            "score": score,
+            "reasons": reasons
+        })
+    
+    # 按分数排序
+    analysis_scores.sort(key=lambda x: x["score"], reverse=True)
+    
+    # 确定主要图层（分数高于平均分或前50%）
+    threshold = 0
+    if analysis_scores:
+        avg_score = sum(item["score"] for item in analysis_scores) / len(analysis_scores)
+        threshold = max(avg_score, analysis_scores[0]["score"] * 0.7)  # 至少是最高分的70%
+        
+        for item in analysis_scores:
+            if item["score"] >= threshold:
+                primary_layers.append(item["layer"])
+            else:
+                excluded_layers.append(item["layer"])
+    
+    return {
+        "primary_layers": primary_layers,
+        "excluded_layers": excluded_layers,
+        "analysis_scores": analysis_scores,
+        "selection_threshold": threshold
+    }
+
+
+def _calculate_intelligent_center(
+    primary_layers: List[Dict[str, Any]], 
+    layer_analysis: Dict[str, Any]
+) -> Dict[str, Any]:
+    """基于主要图层计算智能中心点和缩放级别
+    
+    注意：此函数现在主要用于内部计算，外部调用请使用集成在可视化中的智能中心点功能
+    
+    Args:
+        primary_layers: 主要图层列表
+        layer_analysis: 图层分析结果
+        
+    Returns:
+        智能中心点计算结果
+    """
+    if not primary_layers:
+        raise ValueError("没有主要图层可用于计算中心点")
+    
+    # 收集有效的边界框
+    valid_bboxes = []
+    bbox_weights = []
+    
+    for layer in primary_layers:
+        # 优先使用动态边界框
+        bbox = layer.get("dynamic_bbox")
+        if bbox and isinstance(bbox, dict):
+            bbox = bbox.get("bbox")
+        
+        # 如果没有动态边界框，尝试静态边界框
+        if not bbox or len(bbox) < 4:
+            static_bbox = layer.get("bbox")
+            if static_bbox and isinstance(static_bbox, dict):
+                bbox = static_bbox.get("wgs84")
+        
+        # 验证边界框有效性
+        if bbox and len(bbox) >= 4:
+            # 检查边界框是否为有效的地理坐标范围
+            if (bbox[0] >= -180 and bbox[2] <= 180 and 
+                bbox[1] >= -90 and bbox[3] <= 90 and
+                bbox[0] < bbox[2] and bbox[1] < bbox[3]):
+                valid_bboxes.append(bbox)
+                
+                # 计算权重（矢量数据权重更高）
+                weight = 1.0
+                if layer.get("type") == "wfs":
+                    weight = 2.0
+                if layer.get("dynamic_bbox"):
+                    weight *= 1.5
+                
+                bbox_weights.append(weight)
+    
+    if not valid_bboxes:
+        # 如果没有有效边界框，返回默认的全球视图
+        logger.warning("主要图层中没有有效的边界框信息，使用默认中心点")
+        return {
+            "center": [0, 0],  # 默认经纬度 [lon, lat]
+            "zoom_level": 2,   # 全球视图
+            "bbox": [-180, -90, 180, 90],  # 全球边界框
+            "buffered_bbox": [-180, -90, 180, 90],
+            "bbox_area": 64800,  # 全球面积
+            "recommendations": ["无有效边界框信息，使用默认全球视图"],
+            "warning": "图层缺少边界框信息，建议检查图层注册过程"
+        }
+    
+    # 计算加权合并边界框
+    combined_bbox = _calculate_weighted_combined_bbox(valid_bboxes, bbox_weights)
+    
+    # 计算中心点
+    center_lon = (combined_bbox[0] + combined_bbox[2]) / 2
+    center_lat = (combined_bbox[1] + combined_bbox[3]) / 2
+    
+    # 计算智能缩放级别
+    bbox_width = abs(combined_bbox[2] - combined_bbox[0])
+    bbox_height = abs(combined_bbox[3] - combined_bbox[1])
+    bbox_area = bbox_width * bbox_height
+    
+    # 基于边界框大小的智能缩放级别
+    if bbox_area < 0.001:  # 非常小的区域（建筑级别）
+        zoom_level = 18
+    elif bbox_area < 0.01:  # 小区域（街区级别）
+        zoom_level = 15
+    elif bbox_area < 0.1:  # 中小区域（城市级别）
+        zoom_level = 12
+    elif bbox_area < 1:  # 中等区域（县级）
+        zoom_level = 10
+    elif bbox_area < 10:  # 大区域（州级）
+        zoom_level = 8
+    elif bbox_area < 100:  # 很大区域（国家级）
+        zoom_level = 6
+    else:  # 超大区域
+        zoom_level = 4
+    
+    # 根据图层类型微调缩放级别
+    has_vector_data = any(layer.get("type") == "wfs" for layer in primary_layers)
+    if has_vector_data:
+        zoom_level = min(zoom_level + 1, 18)  # 矢量数据可以放大一级
+    
+    # 添加边界框缓冲区（10%）
+    buffer = max(bbox_width, bbox_height) * 0.1
+    buffered_bbox = [
+        combined_bbox[0] - buffer,
+        combined_bbox[1] - buffer,
+        combined_bbox[2] + buffer,
+        combined_bbox[3] + buffer
+    ]
+    
+    recommendations = []
+    if len(primary_layers) == 1:
+        recommendations.append("单一主要图层，中心点计算精确")
+    if has_vector_data:
+        recommendations.append("包含矢量数据，适合交互式查看")
+    if bbox_area < 1:
+        recommendations.append("区域范围较小，建议启用详细标注")
+    
+    return {
+        "center": [center_lon, center_lat],
+        "zoom_level": zoom_level,
+        "bbox": combined_bbox,
+        "buffered_bbox": buffered_bbox,
+        "bbox_area": bbox_area,
+        "recommendations": recommendations
+    }
+
+
+def _calculate_weighted_combined_bbox(
+    bboxes: List[List[float]], 
+    weights: List[float]
+) -> List[float]:
+    """计算加权合并边界框
+    
+    Args:
+        bboxes: 边界框列表
+        weights: 权重列表
+        
+    Returns:
+        加权合并的边界框
+    """
+    if not bboxes:
+        raise ValueError("边界框列表不能为空")
+    
+    if len(bboxes) != len(weights):
+        weights = [1.0] * len(bboxes)
+    
+    # 计算加权中心点
+    total_weight = sum(weights)
+    weighted_center_lon = sum(
+        ((bbox[0] + bbox[2]) / 2) * weight 
+        for bbox, weight in zip(bboxes, weights)
+    ) / total_weight
+    weighted_center_lat = sum(
+        ((bbox[1] + bbox[3]) / 2) * weight 
+        for bbox, weight in zip(bboxes, weights)
+    ) / total_weight
+    
+    # 找到包含所有边界框的最小边界框
+    min_lon = min(bbox[0] for bbox in bboxes)
+    min_lat = min(bbox[1] for bbox in bboxes)
+    max_lon = max(bbox[2] for bbox in bboxes)
+    max_lat = max(bbox[3] for bbox in bboxes)
+    
+    # 如果加权中心点在合并边界框内，优先使用加权中心点调整边界框
+    if min_lon <= weighted_center_lon <= max_lon and min_lat <= weighted_center_lat <= max_lat:
+        # 基于加权中心点，适当调整边界框大小
+        center_to_edge_lon = max(
+            abs(weighted_center_lon - min_lon),
+            abs(max_lon - weighted_center_lon)
+        )
+        center_to_edge_lat = max(
+            abs(weighted_center_lat - min_lat),
+            abs(max_lat - weighted_center_lat)
+        )
+        
+        return [
+            weighted_center_lon - center_to_edge_lon,
+            weighted_center_lat - center_to_edge_lat,
+            weighted_center_lon + center_to_edge_lon,
+            weighted_center_lat + center_to_edge_lat
+        ]
+    
+    # 否则返回标准合并边界框
+    return [min_lon, min_lat, max_lon, max_lat]
+
+
+def _generate_center_reasoning(
+    layer_analysis: Dict[str, Any], 
+    intelligent_center: Dict[str, Any]
+) -> Dict[str, Any]:
+    """生成中心点选择的推理说明
+    
+    Args:
+        layer_analysis: 图层分析结果
+        intelligent_center: 智能中心点结果
+        
+    Returns:
+        推理说明
+    """
+    primary_count = len(layer_analysis["primary_layers"])
+    excluded_count = len(layer_analysis["excluded_layers"])
+    
+    # 生成主要决策因素
+    decision_factors = []
+    
+    if excluded_count > 0:
+        decision_factors.append(f"排除了{excluded_count}个全球范围或低优先级图层")
+    
+    vector_layers = [
+        layer for layer in layer_analysis["primary_layers"] 
+        if layer.get("type") == "wfs"
+    ]
+    if vector_layers:
+        decision_factors.append(f"优先考虑了{len(vector_layers)}个矢量数据图层")
+    
+    dynamic_bbox_layers = [
+        layer for layer in layer_analysis["primary_layers"] 
+        if layer.get("dynamic_bbox")
+    ]
+    if dynamic_bbox_layers:
+        decision_factors.append(f"使用了{len(dynamic_bbox_layers)}个动态边界框")
+    
+    # 生成缩放级别说明
+    zoom_level = intelligent_center["zoom_level"]
+    bbox_area = intelligent_center["bbox_area"]
+    
+    if bbox_area < 0.01:
+        zoom_explanation = "小范围区域，使用高缩放级别以显示细节"
+    elif bbox_area < 1:
+        zoom_explanation = "中等范围区域，使用适中缩放级别"
+    elif bbox_area < 100:
+        zoom_explanation = "大范围区域，使用较低缩放级别以显示全貌"
+    else:
+        zoom_explanation = "超大范围区域，使用低缩放级别"
+    
+    summary = f"基于{primary_count}个主要图层计算智能中心点，{zoom_explanation}"
+    
+    return {
+        "summary": summary,
+        "decision_factors": decision_factors,
+        "zoom_explanation": zoom_explanation,
+        "primary_layers_info": [
+            {
+                "name": layer["name"],
+                "type": layer.get("type"),
+                "score": next(
+                    item["score"] for item in layer_analysis["analysis_scores"] 
+                    if item["layer"]["name"] == layer["name"]
+                ),
+                "reasons": next(
+                    item["reasons"] for item in layer_analysis["analysis_scores"] 
+                    if item["layer"]["name"] == layer["name"]
+                )
+            }
+            for layer in layer_analysis["primary_layers"]
+        ]
+    }

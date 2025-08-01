@@ -28,16 +28,17 @@ class WFSFilterBuilder:
     def add_property_filter(
         self, 
         property_name: str, 
-        value: Union[str, int, float], 
+        value: Union[str, int, float, List[Union[str, int, float]]], 
         operator: str = "PropertyIsEqualTo"
     ) -> 'WFSFilterBuilder':
         """添加属性过滤条件
         
         Args:
             property_name: 属性名称
-            value: 属性值
+            value: 属性值（支持单个值或列表）
             operator: 过滤操作符（PropertyIsEqualTo, PropertyIsLike, 
                      PropertyIsGreaterThan, PropertyIsLessThan等）
+                     注意：当value为列表时，会自动使用IN操作，忽略operator参数
                      
         Returns:
             过滤器构建器实例（支持链式调用）
@@ -199,6 +200,22 @@ class WFSFilterBuilder:
         property_name = condition["property_name"]
         value = condition["value"]
         operator = condition["operator"]
+        
+        # 处理列表值（IN操作）
+        if isinstance(value, list):
+            if not value:
+                return f"{property_name} IS NULL"
+            
+            # 为列表中的每个字符串值添加引号
+            quoted_values = []
+            for v in value:
+                if isinstance(v, str):
+                    quoted_values.append(f"'{v}'")
+                else:
+                    quoted_values.append(str(v))
+            
+            values_str = ', '.join(quoted_values)
+            return f"{property_name} IN ({values_str})"
         
         # 处理字符串值的引号
         if isinstance(value, str):

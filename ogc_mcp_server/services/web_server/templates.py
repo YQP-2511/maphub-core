@@ -28,7 +28,7 @@ class WebTemplates:
         # 统计信息
         total_viz = len(visualizations)
         wms_count = len([v for v in visualizations.values() if v['type'] == 'wms'])
-        geojson_count = len([v for v in visualizations.values() if v['type'] == 'geojson'])
+        wfs_count = len([v for v in visualizations.values() if v['type'] == 'geojson'])  # WFS数据以geojson形式存储
         composite_count = len([v for v in visualizations.values() if v['type'] == 'composite'])
         
         # 生成可视化列表HTML
@@ -334,8 +334,8 @@ class WebTemplates:
                 <div class="stat-label">WMS地图</div>
             </div>
             <div class="stat-card">
-                <div class="stat-number">{geojson_count}</div>
-                <div class="stat-label">GeoJSON地图</div>
+                <div class="stat-number">{wfs_count}</div>
+                <div class="stat-label">WFS地图</div>
             </div>
             <div class="stat-card">
                 <div class="stat-number">{composite_count}</div>
@@ -404,6 +404,14 @@ class WebTemplates:
         # 生成图层信息HTML
         layers_info_html = self._generate_layers_info_html(layers)
         
+        # 优化图层类型显示
+        layer_types = []
+        for layer in layers:
+            if layer['type'] == 'geojson':
+                layer_types.append('WFS')
+            else:
+                layer_types.append(layer['type'].upper())
+        
         html_content = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -421,7 +429,7 @@ class WebTemplates:
             <div class="map-title">🗺️ {title}</div>
             <div class="map-info">
                 <div class="info-item"><strong>图层数量:</strong> {len(layers)}</div>
-                <div class="info-item"><strong>图层类型:</strong> {', '.join(set(layer['type'].upper() for layer in layers))}</div>
+                <div class="info-item"><strong>图层类型:</strong> {', '.join(set(layer_types))}</div>
                 <div class="info-item"><strong>坐标系:</strong> EPSG:4326</div>
                 <div class="info-item"><strong>服务类型:</strong> 复合可视化</div>
             </div>
@@ -477,8 +485,10 @@ class WebTemplates:
             type_color = "#3498db"
             type_icon = "🗺️"
         elif viz_type == "GEOJSON":
+            # GEOJSON实际上是WFS数据的展示形式
             type_color = "#27ae60"
             type_icon = "📍"
+            viz_type = "WFS"  # 显示为WFS
         elif viz_type == "COMPOSITE":
             type_color = "#e74c3c"
             type_icon = "🌐"
@@ -488,7 +498,7 @@ class WebTemplates:
         
         # 获取统计信息
         stats_html = ""
-        if viz_type == "GEOJSON" and 'geojson_stats' in viz_info:
+        if viz_info['type'] == "geojson" and 'geojson_stats' in viz_info:  # 内部仍使用geojson判断
             stats = viz_info['geojson_stats']
             stats_html = f"""
             <div class="info-item">
@@ -502,7 +512,14 @@ class WebTemplates:
             """
         elif viz_type == "COMPOSITE" and 'layers' in viz_info:
             layers = viz_info['layers']
-            layer_types = [layer['type'].upper() for layer in layers]
+            # 优化图层类型显示
+            layer_types = []
+            for layer in layers:
+                if layer['type'] == 'geojson':
+                    layer_types.append('WFS')
+                else:
+                    layer_types.append(layer['type'].upper())
+            
             stats_html = f"""
             <div class="info-item">
                 <div class="info-label">图层数量</div>
@@ -513,10 +530,12 @@ class WebTemplates:
                 <div class="info-value">{', '.join(set(layer_types))}</div>
             </div>
             """
-            # 添加图层列表
+            # 添加图层列表，显示来源信息
             layer_list_html = '<div class="layer-list">'
             for layer in layers:
-                layer_list_html += f'<div class="layer-item">• {layer.get("name", "未命名图层")} ({layer["type"].upper()})</div>'
+                layer_type = 'WFS' if layer['type'] == 'geojson' else layer['type'].upper()
+                layer_source = layer.get('layer_info', {}).get('service_name', '未知来源')
+                layer_list_html += f'<div class="layer-item">• {layer.get("name", "未命名图层")} ({layer_type} - {layer_source})</div>'
             layer_list_html += '</div>'
             stats_html += f"""
             <div class="info-item" style="grid-column: 1 / -1;">
@@ -820,7 +839,7 @@ class WebTemplates:
                     }}
                 }});
                 
-                layerControl.addOverlay(geojsonLayer{i}, '{layer["name"]}');
+                layerControl.addOverlay(geojsonLayer{i}, '{layer["name"]} (WFS)');
                 if ({str(layer.get("visible", True)).lower()}) {{
                     geojsonLayer{i}.addTo(map);
                 }}
@@ -834,7 +853,9 @@ class WebTemplates:
         """生成图层信息HTML"""
         layers_info = '<div class="layer-info"><div class="layer-count">包含图层:</div>'
         for layer in layers:
-            layers_info += f'<div>• {layer["name"]} ({layer["type"].upper()})</div>'
+            layer_type = 'WFS' if layer['type'] == 'geojson' else layer['type'].upper()
+            layer_source = layer.get('layer_info', {}).get('service_name', '未知来源')
+            layers_info += f'<div>• {layer["name"]} ({layer_type} - {layer_source})</div>'
         layers_info += '</div>'
         return layers_info
     
