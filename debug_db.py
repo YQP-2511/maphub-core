@@ -1,15 +1,13 @@
 """
-调试脚本 - 检查数据库中的图层数据
+调试脚本 - 检查数据库中的表信息和数据内容
 """
 
 import asyncio
 import aiosqlite
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
-from collections import defaultdict
 
-async def debug_database():
-    """调试数据库中的图层数据"""
+async def show_database_tables():
+    """显示数据库中的表信息和数据内容"""
     db_path = Path("data/ogc_layers.db")
     
     if not db_path.exists():
@@ -17,189 +15,85 @@ async def debug_database():
         return
     
     async with aiosqlite.connect(db_path) as conn:
-        # 查询总数
-        cursor = await conn.execute("SELECT COUNT(*) as total FROM layer_resources")
-        total_result = await cursor.fetchone()
-        total_count = total_result[0] if total_result else 0
-        
-        print(f"数据库中总图层数: {total_count}")
-        
-        # 按服务类型统计
+        # 获取所有表名
         cursor = await conn.execute("""
-            SELECT service_type, COUNT(*) as count 
-            FROM layer_resources 
-            GROUP BY service_type
+            SELECT name FROM sqlite_master 
+            WHERE type='table' 
+            ORDER BY name
         """)
-        type_stats = await cursor.fetchall()
+        tables = await cursor.fetchall()
         
-        print("\n按服务类型统计:")
-        for service_type, count in type_stats:
-            print(f"  {service_type}: {count}")
+        print(f"数据库中的表 (共{len(tables)}个):")
+        print("=" * 80)
         
-        # 查询所有图层的详细信息（包括URL）
-        cursor = await conn.execute("""
-            SELECT resource_id, service_name, service_url, service_type, layer_name, layer_title
-            FROM layer_resources 
-            ORDER BY service_name, service_type, layer_name
-        """)
-        all_layers = await cursor.fetchall()
-        
-        print(f"\n所有图层详情 (共{len(all_layers)}个):")
-        for i, (resource_id, service_name, service_url, service_type, layer_name, layer_title) in enumerate(all_layers, 1):
-            print(f"{i:2d}. [{service_type}] {service_name} - {layer_name}")
-            print(f"     资源ID: {resource_id}")
-            print(f"     服务URL: {service_url}")
-            if layer_title:
-                print(f"     标题: {layer_title}")
-            print()
-        
-        # URL 格式分析
-        await analyze_url_formats(conn)
-        
-        # 检查是否有重复的图层
-        cursor = await conn.execute("""
-            SELECT service_url, layer_name, service_type, COUNT(*) as count
-            FROM layer_resources 
-            GROUP BY service_url, layer_name, service_type
-            HAVING COUNT(*) > 1
-        """)
-        duplicates = await cursor.fetchall()
-        
-        if duplicates:
-            print("发现重复图层:")
-            for service_url, layer_name, service_type, count in duplicates:
-                print(f"  {service_type} - {layer_name}: {count} 个重复")
-                print(f"    URL: {service_url}")
-        else:
-            print("未发现重复图层")
+        for (table_name,) in tables:
+            await show_table_details(conn, table_name)
 
-async def analyze_url_formats(conn):
-    """分析数据库中URL的格式"""
-    print("\n=== URL 格式分析 ===")
+async def show_table_details(conn, table_name):
+    """显示单个表的详细信息和数据内容"""
+    print(f"\n表名: {table_name}")
+    print("-" * 60)
     
-    # 获取所有唯一的服务URL
+    # 获取记录数
+    cursor = await conn.execute(f"SELECT COUNT(*) FROM {table_name}")
+    count = (await cursor.fetchone())[0]
+    print(f"记录数: {count}")
+    
+    # 显示表中的数据内容
+    if count > 0:
+        print(f"\n表数据内容:")
+        
+        # 如果是layer_resources表，只显示关键字段
+        if table_name == 'layer_resources':
+            await show_layer_resources_data(conn)
+        else:
+            # 其他表显示所有字段
+            await show_all_table_data(conn, table_name)
+    else:
+        print("表中无数据")
+    
+    print("\n" + "=" * 80)
+
+async def show_layer_resources_data(conn):
+    """显示layer_resources表的关键数据"""
     cursor = await conn.execute("""
-        SELECT DISTINCT service_url, service_type
+        SELECT service_name, service_url, service_type, layer_name
         FROM layer_resources 
-        ORDER BY service_url
+        ORDER BY service_name, service_type, layer_name
     """)
-    unique_urls = await cursor.fetchall()
+    rows = await cursor.fetchall()
     
-    print(f"\n唯一服务URL数量: {len(unique_urls)}")
+    print(f"{'序号':<4} {'服务名':<20} {'服务类型':<8} {'图层名':<25} {'服务URL'}")
+    print("-" * 100)
     
-    # 按URL格式分类
-    url_categories = {
-        'with_query_params': [],      # 包含查询参数的URL
-        'with_endpoints': [],         # 包含端点的URL
-        'base_urls': [],             # 基础URL
-        'potential_issues': []        # 可能有问题的URL
-    }
-    
-    endpoint_patterns = ['/ows', '/wms', '/wfs', '/geoserver', '/mapserver', '/cgi-bin']
-    
-    for service_url, service_type in unique_urls:
-        parsed = urlparse(service_url)
+    for i, (service_name, service_url, service_type, layer_name) in enumerate(rows, 1):
+        # 截断过长的字段以保持格式整齐
+        service_name_short = service_name[:18] + ".." if len(service_name) > 20 else service_name
+        layer_name_short = layer_name[:23] + ".." if len(layer_name) > 25 else layer_name
+        service_url_short = service_url[:50] + ".." if len(service_url) > 52 else service_url
         
-        # 检查是否包含查询参数
-        if parsed.query:
-            url_categories['with_query_params'].append((service_url, service_type, parsed.query))
-        
-        # 检查是否包含常见端点
-        elif any(endpoint in parsed.path.lower() for endpoint in endpoint_patterns):
-            url_categories['with_endpoints'].append((service_url, service_type, parsed.path))
-        
-        # 基础URL
-        else:
-            url_categories['base_urls'].append((service_url, service_type, parsed.path))
-        
-        # 检查潜在问题
-        if not service_url.startswith(('http://', 'https://')):
-            url_categories['potential_issues'].append((service_url, service_type, '不是有效的HTTP URL'))
-        elif not parsed.netloc:
-            url_categories['potential_issues'].append((service_url, service_type, '缺少域名'))
-    
-    # 输出分析结果
-    print(f"\n1. 包含查询参数的URL ({len(url_categories['with_query_params'])}个):")
-    for url, service_type, query in url_categories['with_query_params']:
-        print(f"   [{service_type}] {url}")
-        print(f"       查询参数: {query}")
-    
-    print(f"\n2. 包含端点的URL ({len(url_categories['with_endpoints'])}个):")
-    for url, service_type, path in url_categories['with_endpoints']:
-        print(f"   [{service_type}] {url}")
-        print(f"       路径: {path}")
-    
-    print(f"\n3. 基础URL ({len(url_categories['base_urls'])}个):")
-    for url, service_type, path in url_categories['base_urls']:
-        print(f"   [{service_type}] {url}")
-        if path and path != '/':
-            print(f"       路径: {path}")
-    
-    if url_categories['potential_issues']:
-        print(f"\n4. 潜在问题的URL ({len(url_categories['potential_issues'])}个):")
-        for url, service_type, issue in url_categories['potential_issues']:
-            print(f"   [{service_type}] {url}")
-            print(f"       问题: {issue}")
-    
-    # 统计URL域名分布
-    await analyze_url_domains(conn)
+        print(f"{i:<4} {service_name_short:<20} {service_type:<8} {layer_name_short:<25} {service_url_short}")
 
-async def analyze_url_domains(conn):
-    """分析URL的域名分布"""
-    print("\n=== URL 域名分布 ===")
+async def show_all_table_data(conn, table_name):
+    """显示其他表的完整数据"""
+    # 获取表结构
+    cursor = await conn.execute(f"PRAGMA table_info({table_name})")
+    columns = await cursor.fetchall()
+    column_names = [col[1] for col in columns]
     
-    cursor = await conn.execute("""
-        SELECT DISTINCT service_url
-        FROM layer_resources
-    """)
-    urls = await cursor.fetchall()
+    # 限制显示前10条记录
+    cursor = await conn.execute(f"SELECT * FROM {table_name} LIMIT 10")
+    rows = await cursor.fetchall()
     
-    domain_stats = defaultdict(int)
+    # 打印表头
+    header = " | ".join(f"{col:15}" for col in column_names)
+    print(f"  {header}")
+    print(f"  {'-' * len(header)}")
     
-    for (url,) in urls:
-        try:
-            parsed = urlparse(url)
-            domain = parsed.netloc.lower()
-            if domain:
-                domain_stats[domain] += 1
-        except Exception as e:
-            print(f"解析URL失败: {url} - {e}")
-    
-    print(f"\n域名统计 (共{len(domain_stats)}个不同域名):")
-    for domain, count in sorted(domain_stats.items(), key=lambda x: x[1], reverse=True):
-        cursor = await conn.execute("""
-            SELECT COUNT(*) 
-            FROM layer_resources 
-            WHERE service_url LIKE ?
-        """, (f'%{domain}%',))
-        layer_count = (await cursor.fetchone())[0]
-        print(f"  {domain}: {count} 个服务URL, {layer_count} 个图层")
-
-async def show_url_standardization_examples():
-    """显示URL标准化示例"""
-    print("\n=== URL 标准化示例 ===")
-    
-    examples = [
-        "http://mesonet.agron.iastate.edu/cgi-bin/wms/nexrad/n0r.cgi?service=wms&request=getcapabilities",
-        "http://localhost:8090/geoserver/ows",
-        "http://localhost:8090/geoserver",
-        "https://ows.terrestris.de/osm/ows?service=WMS&request=GetCapabilities",
-        "http://example.com/mapserver/mapserv"
-    ]
-    
-    print("以下是不同URL格式的标准化示例:")
-    for i, url in enumerate(examples, 1):
-        parsed = urlparse(url)
-        # 模拟标准化过程
-        standardized = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-        standardized = standardized.rstrip('/')
-        
-        print(f"{i}. 原始URL: {url}")
-        print(f"   标准化后: {standardized}")
-        if parsed.query:
-            print(f"   移除的查询参数: {parsed.query}")
-        print()
+    # 打印数据行
+    for row in rows:
+        row_data = " | ".join(f"{str(val)[:15]:15}" for val in row)
+        print(f"  {row_data}")
 
 if __name__ == "__main__":
-    asyncio.run(debug_database())
-    asyncio.run(show_url_standardization_examples())
+    asyncio.run(show_database_tables())

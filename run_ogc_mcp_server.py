@@ -42,7 +42,7 @@ def main():
     http_app = mcp.http_app(middleware=cors_middleware)
     
     # 服务器配置
-    port = 1000
+    port = 2000
     host = "127.0.0.1"
     
     logger.info(f"服务器将在 http://{host}:{port}/mcp 启动")

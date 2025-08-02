@@ -61,15 +61,14 @@ def geo_visualization_workflow(
 
 ### 📊 管理工具（Management Tools）
 - `mgmt_list_layers_from_resource` - 获取完整图层清单
-- `mgmt_clear_visualization_layers` - 清空当前图层列表  
-- `mgmt_list_current_layers` - 列出当前已添加的图层
 
 ### 🎨 可视化工具（Visualization Tools）
-- `viz_add_wms_layer` - 添加WMS图层（栅格/底图）
-- `viz_add_wfs_layer` - 添加WFS图层（矢量/要素）
-- `viz_add_wmts_layer` - 添加WMTS图层（瓦片地图）
+- `wms_add_wms_layer` - 添加WMS图层（栅格/底图）
+- `wfs_add_wfs_layer` - 添加WFS图层（矢量/要素）
+- `wmts_add_wmts_layer` - 添加WMTS图层（瓦片地图）
 - `viz_create_composite_visualization` - 创建复合可视化（自动应用智能中心点）
-
+- `viz_clear_visualization_layers` - 清空当前可视化图层
+- `viz_list_current_layers` - 列出当前已添加的图层
 ---
 
 ### 🔍 阶段一：全面数据资源发现（强制执行）
@@ -116,14 +115,14 @@ def geo_visualization_workflow(
 - 需要高质量、多尺度的底图
 - 对加载性能要求较高
 - 作为主要的地理背景参考
-- **使用 `viz_add_wmts_layer` 工具**
+- **使用 `wmts_add_wmts_layer` 工具**
 - 可选参数：tile_matrix_set（瓦片矩阵集）、style（样式）、format（格式）
 
 **选择WMS的情况**：
 - 需要动态渲染的底图
 - 对底图有特殊样式要求
 - WMTS不可用时的备选方案
-- **使用 `viz_add_wms_layer` 工具**
+- **使用 `wms_add_wms_layer` 工具**
 
 **📊 添加专题数据图层（根据需求选择）**：
 
@@ -132,7 +131,7 @@ def geo_visualization_workflow(
 - 需要精确的矢量边界
 - 数据量不大（建议<1000个要素）
 - 需要交互式查询和属性过滤
-- **使用 `viz_add_wfs_layer` 工具**
+- **使用 `wfs_add_wfs_layer` 工具**
 - 重要参数：max_features（控制数据量）、property_filters（属性过滤）
 
 **选择WMS的情况**：
@@ -140,16 +139,16 @@ def geo_visualization_workflow(
 - 主要关注空间分布模式
 - 需要快速加载和显示
 - 作为背景参考图层
-- **使用 `viz_add_wms_layer` 工具**
+- **使用 `wms_add_wms_layer` 工具**
 
 **选择WMTS的情况**：
 - 预渲染的专题数据
 - 需要多尺度展示的数据
 - 对性能要求极高的场景
-- **使用 `viz_add_wmts_layer` 工具**
+- **使用 `wmts_add_wmts_layer` 工具**
 
 #### 步骤3：检查当前图层状态
-**使用 `mgmt_list_current_layers` 工具**：
+**使用 `viz_list_current_layers` 工具**：
    - 确认已添加的图层
    - 检查图层类型和数量
    - 验证图层配置是否正确
@@ -215,9 +214,9 @@ def geo_visualization_workflow(
 
 ### 完整工具使用顺序（必须按顺序执行）：
 1. `mgmt_list_layers_from_resource` - 发现数据
-2. `mgmt_clear_visualization_layers` - 清空列表
-3. `viz_add_wmts_layer` / `viz_add_wms_layer` / `viz_add_wfs_layer` - 添加图层（可多次调用）
-4. `mgmt_list_current_layers` - 检查状态
+2. `viz_clear_visualization_layers` - 清空列表
+3. `wmts_add_wmts_layer` / `wms_add_wms_layer` / `wfs_add_wfs_layer` - 添加图层（可多次调用）
+4. `viz_list_current_layers` - 检查状态
 5. `viz_create_composite_visualization` - 创建可视化（自动应用智能中心点）
 
 ---
@@ -295,9 +294,9 @@ def layer_selection_guide(
 3. **根据上述指导原则选择最适合的服务类型**
 
 4. **使用相应的工具添加图层：**
-   - WMTS: `viz_add_wmts_layer` - 高性能瓦片地图
-   - WMS: `viz_add_wms_layer` - 栅格图像服务
-   - WFS: `viz_add_wfs_layer` - 矢量要素服务
+   - WMTS: `wmts_add_wmts_layer` - 高性能瓦片地图
+   - WMS: `wms_add_wms_layer` - 栅格图像服务
+   - WFS: `wfs_add_wfs_layer` - 矢量要素服务
 
 5. **直接创建可视化（不询问用户）：**
    - `viz_create_composite_visualization` - 自动应用智能中心点
@@ -420,10 +419,8 @@ prefer_vector_data=True
 ## 🚀 工作流程建议：
 
 1. 添加所有需要的图层
-2. 使用 `mgmt_list_current_layers` 检查图层状态
-3. 使用 `viz_determine_intelligent_center_point` 进行
-智能分析
-4. 使用 `viz_create_composite_visualization` 创建可视
+2. 使用 `viz_list_current_layers` 检查图层状态
+3. 使用 `viz_create_composite_visualization` 创建可视
 化
 ## 🎯 标准执行模板
 1. 正在发现相关数据...

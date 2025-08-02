@@ -16,6 +16,9 @@ from .services.web_server.server import get_web_server, stop_web_server
 from .tools.management_tools import management_server
 
 from .tools.visualization_tools import visualization_server
+from .tools.wms_layer_tool import wms_layer_server
+from .tools.wfs_layer_tool import wfs_layer_server
+from .tools.wmts_layer_tool import wmts_layer_server
 from .resources.layer_registry import layer_registry_server
 from .prompts.workflow_prompts import workflow_prompts_server
 
@@ -84,6 +87,9 @@ async def lifespan(app):
                 await app.import_server(management_server, prefix="mgmt")        # 管理工具
 
                 await app.import_server(visualization_server, prefix="viz")     # 通用可视化工具
+                await app.import_server(wms_layer_server, prefix="wms")          # WMS图层工具
+                await app.import_server(wfs_layer_server, prefix="wfs")          # WFS图层工具
+                await app.import_server(wmts_layer_server, prefix="wmts")        # WMTS图层工具
                 await app.import_server(workflow_prompts_server, prefix="workflow")  # 工作流提示词
                 await app.import_server(layer_registry_server)                 # 图层注册表资源（无前缀）
                 
@@ -92,8 +98,9 @@ async def lifespan(app):
                 logger.info("OGC MCP服务器组合完成")
                 logger.info("已导入的服务模块:")
                 logger.info("- 管理工具 (mgmt_*)")
-                logger.info("- WMS工具 (wms_*)")
-                logger.info("- WFS工具 (wfs_*)")
+                logger.info("- WMS图层工具 (wms_*)")
+                logger.info("- WFS图层工具 (wfs_*)")
+                logger.info("- WMTS图层工具 (wmts_*)")
                 logger.info("- 通用可视化工具 (viz_*)")
                 logger.info("- 工作流提示词 (workflow_*)")
                 logger.info("- 图层注册表资源 (ogc://)")

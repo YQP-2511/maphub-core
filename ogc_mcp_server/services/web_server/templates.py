@@ -839,6 +839,11 @@ class WebTemplates:
                     }}
                 }});
                 
+                // 将图层添加到边界框数组中，用于自动缩放
+                if (geojsonLayer{i}.getBounds && geojsonLayer{i}.getBounds().isValid()) {{
+                    allLayerBounds.push(geojsonLayer{i});
+                }}
+                
                 layerControl.addOverlay(geojsonLayer{i}, '{layer["name"]} (WFS)');
                 if ({str(layer.get("visible", True)).lower()}) {{
                     geojsonLayer{i}.addTo(map);
@@ -980,7 +985,7 @@ class WebTemplates:
             noWrap: false
         }});
         
-        var satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{{z}}/{{y}}/{{x}}', {{
+        var satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{{z}}/{{y}}/{{x}}.png', {{
             attribution: '© Esri',
             crs: L.CRS.EPSG3857,
             tileSize: 256,
@@ -1012,8 +1017,26 @@ class WebTemplates:
         }};
         coordSystemInfo.addTo(map);
         
+        // 存储所有图层的边界框，用于自动缩放
+        var allLayerBounds = [];
+        
         // 添加图层 - 坐标对齐处理
         {layers_js}
+        
+        // 自动缩放到所有图层的边界框
+        setTimeout(function() {{
+            if (allLayerBounds.length > 0) {{
+                var group = new L.featureGroup(allLayerBounds);
+                if (group.getBounds().isValid()) {{
+                    map.fitBounds(group.getBounds(), {{padding: [20, 20]}});
+                    console.log('🎯 自动缩放到图层边界');
+                }} else {{
+                    console.log('📍 使用AI计算的中心点: [{center[0]}, {center[1]}], 缩放级别: {zoom}');
+                }}
+            }} else {{
+                console.log('📍 使用AI计算的中心点: [{center[0]}, {center[1]}], 缩放级别: {zoom}');
+            }}
+        }}, 1000);
         
         // 添加比例尺
         L.control.scale({{
