@@ -29,25 +29,48 @@ class CapabilitiesParser:
         self.url_utils = url_utils
         self.timeout = timeout
     
-    def _get_service_title(self, service_obj, default_title: str) -> str:
-        """安全地获取服务标题
+    def _generate_service_name(self, service_obj, url: str, default_title: str) -> str:
+        """生成服务名称
+        
+        优先使用从URL提取的域名作为服务名，避免包含服务类型造成歧义
         
         Args:
             service_obj: OWS服务对象
+            url: 服务URL
             default_title: 默认标题
             
         Returns:
-            服务标题
+            生成的服务名称
         """
         try:
+            # 首先尝试从URL提取服务名
+            url_based_name = self.url_utils.extract_service_name_from_url(url)
+            if url_based_name and url_based_name != 'unknown_service':
+                return url_based_name
+            
+            # 如果URL提取失败，尝试从服务信息中获取标题
             if hasattr(service_obj, 'identification') and service_obj.identification:
                 identification = service_obj.identification
                 if hasattr(identification, 'title') and identification.title:
-                    return identification.title
+                    title = identification.title.strip()
+                    # 移除服务类型相关的词汇，避免歧义
+                    title_lower = title.lower()
+                    service_types = ['wms', 'wfs', 'wmts', 'web map service', 'web feature service', 'web map tile service']
+                    for service_type in service_types:
+                        if service_type in title_lower:
+                            # 移除服务类型词汇
+                            title = title_lower.replace(service_type, '').strip()
+                            break
+                    
+                    if title and len(title) > 2:  # 确保标题有意义
+                        return title.title()  # 首字母大写
+            
         except Exception as e:
-            logger.debug(f"获取服务标题失败: {e}")
+            logger.debug(f"生成服务名称失败: {e}")
         
-        return default_title
+        # 最后使用默认标题，但移除服务类型
+        default_clean = default_title.replace('WMS', '').replace('WFS', '').replace('WMTS', '').replace('Service', '').strip()
+        return default_clean if default_clean else 'Unknown Service'
     
     async def parse_wms_service(self, url: str, service_name: str = None) -> List[LayerResourceCreate]:
         """解析WMS服务
@@ -117,9 +140,9 @@ class CapabilitiesParser:
                 else:
                     raise ValueError(f"WMS服务解析失败: {e}")
             
-            # 如果没有提供服务名称，尝试从服务信息中获取
+            # 生成服务名称
             if not service_name:
-                service_name = self._get_service_title(wms, 'Unknown WMS Service')
+                service_name = self._generate_service_name(wms, url, 'Unknown Service')
             
             layers = []
             
@@ -188,9 +211,9 @@ class CapabilitiesParser:
             # 创建WFS服务对象
             wfs = WebFeatureService(capabilities_url, timeout=self.timeout)
             
-            # 如果没有提供服务名称，尝试从服务信息中获取
+            # 生成服务名称
             if not service_name:
-                service_name = self._get_service_title(wfs, 'Unknown WFS Service')
+                service_name = self._generate_service_name(wfs, url, 'Unknown Service')
             
             layers = []
             
@@ -238,35 +261,20 @@ class CapabilitiesParser:
             ValueError: 当服务解析失败时
         """
         try:
-            # 对于完整的WMTS能力文档URL，直接使用
-            if 'service=WMTS' in url and 'request=GetCapabilities' in url:
-                capabilities_url = url
-                working_url = url.split('?')[0]  # 移除查询参数作为基础URL
-                logger.info(f"使用完整的WMTS能力文档URL: {capabilities_url}")
-            # 对于GeoServer的WMTS服务，检查是否包含gwc路径
-            elif 'gwc/service/wmts' in url:
-                if '?' in url:
-                    capabilities_url = url
-                    working_url = url.split('?')[0]
-                else:
-                    working_url = url
-                    capabilities_url = self.url_utils.build_capabilities_url(working_url, 'WMTS')
-                logger.info(f"检测到GeoServer GWC WMTS服务: {capabilities_url}")
-            else:
-                # 查找可用的WMTS端点
-                working_url = await self.url_utils.find_working_endpoint(url, 'WMTS')
-                if not working_url:
-                    working_url = url
-                
-                # 构建能力文档URL
-                capabilities_url = self.url_utils.build_capabilities_url(working_url, 'WMTS')
+            # 查找可用的WMTS端点
+            working_url = await self.url_utils.find_working_endpoint(url, 'WMTS')
+            if not working_url:
+                working_url = url
             
             # 标准化URL用于数据库存储
             standardized_url = self.url_utils.standardize_service_url(working_url)
             
+            # 构建能力文档URL
+            capabilities_url = self.url_utils.build_capabilities_url(working_url, 'WMTS')
+            
             logger.info(f"解析WMTS服务: {capabilities_url}")
             
-            # 添加额外的调试信息
+            # 添加预检查机制
             try:
                 # 先测试URL是否可访问
                 import httpx
@@ -297,15 +305,11 @@ class CapabilitiesParser:
                 
             except Exception as e:
                 logger.error(f"创建WMTS服务对象失败: {e}")
-                # 尝试获取更详细的错误信息
-                if "NoneType" in str(e) and "findall" in str(e):
-                    raise ValueError(f"WMTS能力文档解析失败：文档格式可能不兼容OWSLib解析器。错误详情: {e}")
-                else:
-                    raise ValueError(f"WMTS服务解析失败: {e}")
+                raise ValueError(f"WMTS服务解析失败: {e}")
             
-            # 如果没有提供服务名称，尝试从服务信息中获取
+            # 生成服务名称
             if not service_name:
-                service_name = self._get_service_title(wmts, 'Unknown WMTS Service')
+                service_name = self._generate_service_name(wmts, url, 'Unknown Service')
             
             layers = []
             
@@ -344,46 +348,60 @@ class CapabilitiesParser:
             logger.error(f"解析WMTS服务失败: {e}")
             raise ValueError(f"无法解析WMTS服务: {e}")
     
-    async def parse_ogc_service(self, url: str, service_name: str = None) -> List[LayerResourceCreate]:
-        """自动检测并解析OGC服务
-        
-        尝试同时解析WMS、WFS和WMTS服务，返回所有找到的图层
+    async def parse_ogc_service(self, url: str, service_type: str = None, service_name: str = None) -> List[LayerResourceCreate]:
+        """解析OGC服务（自动检测服务类型或解析指定类型）
         
         Args:
             url: OGC服务URL
+            service_type: 指定的服务类型（可选，如果不指定则自动检测所有类型）
             service_name: 服务名称（可选）
             
         Returns:
             图层资源创建对象列表
+            
+        Raises:
+            ValueError: 当服务解析失败时
         """
         all_layers = []
         
-        # 尝试解析WMS
-        try:
-            wms_layers = await self.parse_wms_service(url, service_name)
-            all_layers.extend(wms_layers)
-            logger.info(f"WMS解析成功，找到 {len(wms_layers)} 个图层")
-        except Exception as e:
-            logger.debug(f"WMS解析失败: {e}")
+        # 如果指定了服务类型，只解析该类型
+        if service_type:
+            service_types = [service_type.upper()]
+        else:
+            # 否则尝试解析所有支持的服务类型
+            service_types = ['WMS', 'WFS', 'WMTS']
         
-        # 尝试解析WFS
-        try:
-            wfs_layers = await self.parse_wfs_service(url, service_name)
-            all_layers.extend(wfs_layers)
-            logger.info(f"WFS解析成功，找到 {len(wfs_layers)} 个要素类型")
-        except Exception as e:
-            logger.debug(f"WFS解析失败: {e}")
+        successful_types = []
+        errors = []
         
-        # 尝试解析WMTS
-        try:
-            wmts_layers = await self.parse_wmts_service(url, service_name)
-            all_layers.extend(wmts_layers)
-            logger.info(f"WMTS解析成功，找到 {len(wmts_layers)} 个图层")
-        except Exception as e:
-            logger.debug(f"WMTS解析失败: {e}")
+        for svc_type in service_types:
+            try:
+                if svc_type == 'WMS':
+                    layers = await self.parse_wms_service(url, service_name)
+                elif svc_type == 'WFS':
+                    layers = await self.parse_wfs_service(url, service_name)
+                elif svc_type == 'WMTS':
+                    layers = await self.parse_wmts_service(url, service_name)
+                else:
+                    continue
+                
+                if layers:  # 只有当找到图层时才认为解析成功
+                    all_layers.extend(layers)
+                    successful_types.append(svc_type)
+                    logger.info(f"成功解析{svc_type}服务，找到 {len(layers)} 个图层")
+                
+            except Exception as e:
+                error_msg = f"解析{svc_type}服务失败: {e}"
+                errors.append(error_msg)
+                logger.debug(error_msg)
+                continue
         
+        # 如果没有成功解析任何服务类型，抛出错误
         if not all_layers:
-            raise ValueError(f"无法从URL解析任何OGC服务: {url}")
+            if errors:
+                raise ValueError(f"无法解析OGC服务 {url}。错误详情: {'; '.join(errors)}")
+            else:
+                raise ValueError(f"OGC服务 {url} 没有找到任何图层")
         
-        logger.info(f"OGC服务解析完成，总共找到 {len(all_layers)} 个图层")
+        logger.info(f"OGC服务解析完成，共解析 {len(successful_types)} 种服务类型: {', '.join(successful_types)}，总计 {len(all_layers)} 个图层")
         return all_layers

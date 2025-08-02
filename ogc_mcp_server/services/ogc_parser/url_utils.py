@@ -45,6 +45,73 @@ class URLUtils:
         """关闭HTTP客户端"""
         await self.http_client.aclose()
     
+    def extract_service_name_from_url(self, url: str) -> str:
+        """从URL中提取服务名称
+        
+        根据URL的域名和路径提取有意义的服务名称，避免包含服务类型造成歧义
+        
+        处理规则：
+        1. localhost/geoserver -> geoserver
+        2. www.example.com -> example
+        3. gisserver.tianditu.gov.cn -> tianditu
+        4. ows.terrestris.de -> terrestris
+        5. 如果路径包含特定服务名（如geoserver），优先使用
+        
+        Args:
+            url: 服务URL
+            
+        Returns:
+            提取的服务名称
+        """
+        try:
+            parsed = urlparse(url)
+            hostname = parsed.hostname or parsed.netloc
+            path = parsed.path.strip('/')
+            
+            # 如果路径包含已知的服务名称，优先使用
+            known_services = ['geoserver', 'mapserver', 'qgis', 'arcgis']
+            for service in known_services:
+                if service in path.lower():
+                    return service
+            
+            # 处理localhost情况
+            if hostname and hostname.lower() in ['localhost', '127.0.0.1']:
+                # 从路径中提取服务名
+                path_parts = [part for part in path.split('/') if part]
+                if path_parts:
+                    # 取第一个有意义的路径部分
+                    first_part = path_parts[0].lower()
+                    if first_part not in ['ows', 'wms', 'wfs', 'wmts', 'gwc', 'service']:
+                        return first_part
+                return 'localhost'
+            
+            # 处理域名
+            if hostname:
+                # 移除www前缀
+                if hostname.startswith('www.'):
+                    hostname = hostname[4:]
+                
+                # 分割域名部分
+                domain_parts = hostname.split('.')
+                
+                # 提取主要域名部分
+                if len(domain_parts) >= 2:
+                    # 对于gov.cn, com.cn等，取倒数第三个部分
+                    if len(domain_parts) >= 3 and domain_parts[-2] in ['gov', 'com', 'org', 'net']:
+                        return domain_parts[-3]
+                    # 一般情况取倒数第二个部分（主域名）
+                    else:
+                        return domain_parts[-2]
+                else:
+                    return domain_parts[0]
+            
+            # 如果无法提取，返回默认名称
+            return 'unknown_service'
+            
+        except Exception as e:
+            logger.warning(f"从URL提取服务名失败 {url}: {e}")
+            return 'unknown_service'
+    
     def normalize_service_url(self, url: str, service_type: str) -> str:
         """标准化服务URL（旧方法，保持向后兼容）
         
@@ -257,3 +324,4 @@ class URLUtils:
             return response.status_code == 200
         except Exception as e:
             logger.warning(f"服务不可用 {url}: {e}")
+            return False
