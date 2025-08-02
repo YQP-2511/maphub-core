@@ -12,6 +12,7 @@ import atexit
 import re
 import hashlib
 import time
+from datetime import datetime
 from typing import Dict, Any, Optional, List
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, quote
@@ -322,15 +323,25 @@ class WebVisualizationServer:
                 processed_layer = self.composite_handler.process_layer_data(layer_config)
                 processed_layers.append(processed_layer)
             
-            # 计算地图边界（如果没有提供中心点）
-            if 'center' not in map_config:
+            # 优化地图边界计算逻辑
+            if 'center' not in map_config or 'zoom' not in map_config:
                 bounds = self.composite_handler.calculate_map_bounds(processed_layers)
                 if bounds:
-                    center_lat = (bounds['north'] + bounds['south']) / 2
-                    center_lng = (bounds['east'] + bounds['west']) / 2
-                    map_config['center'] = [center_lat, center_lng]
+                    # 计算中心点
+                    if 'center' not in map_config:
+                        center_lat = (bounds['north'] + bounds['south']) / 2
+                        center_lng = (bounds['east'] + bounds['west']) / 2
+                        map_config['center'] = [center_lat, center_lng]
+                    
+                    # 计算合适的缩放级别
+                    if 'zoom' not in map_config:
+                        map_config['zoom'] = self._calculate_optimal_zoom(bounds)
                 else:
-                    map_config['center'] = [39.9042, 116.4074]  # 默认北京
+                    # 使用默认配置
+                    if 'center' not in map_config:
+                        map_config['center'] = [39.9042, 116.4074]  # 默认北京
+                    if 'zoom' not in map_config:
+                        map_config['zoom'] = 10
             
             # 生成复合地图HTML
             html_content = await self.composite_handler.generate_composite_map(
@@ -342,20 +353,23 @@ class WebVisualizationServer:
             with open(html_path, 'w', encoding='utf-8') as f:
                 f.write(html_content)
             
-            # 存储可视化信息
+            # 存储可视化信息，增加更多元数据
             self.visualizations[viz_id] = {
+                "id": viz_id,
                 "type": "composite",
                 "layer_name": title,
                 "layer_info": {
                     "layer_title": title,
                     "service_name": "复合可视化",
-                    "crs": "EPSG:4326"
+                    "crs": "EPSG:4326",
+                    "layer_count": len(processed_layers)
                 },
                 "layers": processed_layers,
                 "map_config": map_config,
                 "html_file": html_path,
                 "url": f"{self._get_base_url()}/{viz_id}.html",
-                "created_at": asyncio.get_event_loop().time()
+                "created_at": time.time(),
+                "created_at_formatted": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
             
             # 更新首页
@@ -368,6 +382,49 @@ class WebVisualizationServer:
         except Exception as e:
             logger.error(f"创建复合可视化失败: {e}")
             raise
+    
+    def _calculate_optimal_zoom(self, bounds: Dict[str, float]) -> int:
+        """根据边界计算最佳缩放级别
+        
+        Args:
+            bounds: 边界信息
+            
+        Returns:
+            最佳缩放级别
+        """
+        # 计算经纬度跨度
+        lat_span = bounds['north'] - bounds['south']
+        lng_span = bounds['east'] - bounds['west']
+        
+        # 根据跨度确定缩放级别
+        max_span = max(lat_span, lng_span)
+        
+        if max_span > 180:
+            return 2
+        elif max_span > 90:
+            return 3
+        elif max_span > 45:
+            return 4
+        elif max_span > 20:
+            return 5
+        elif max_span > 10:
+            return 6
+        elif max_span > 5:
+            return 7
+        elif max_span > 2:
+            return 8
+        elif max_span > 1:
+            return 9
+        elif max_span > 0.5:
+            return 10
+        elif max_span > 0.25:
+            return 11
+        elif max_span > 0.125:
+            return 12
+        elif max_span > 0.05:
+            return 13
+        else:
+            return 14
     
     def get_visualization_url(self, viz_id: str) -> Optional[str]:
         """获取可视化URL

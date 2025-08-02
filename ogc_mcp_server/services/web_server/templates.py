@@ -13,7 +13,6 @@ logger = logging.getLogger(__name__)
 
 class WebTemplates:
     """Web模板生成器"""
-    
     def generate_index_page(self, visualizations: Dict[str, Any], 
                            server_info: Dict[str, Any]) -> str:
         """生成首页HTML
@@ -28,14 +27,29 @@ class WebTemplates:
         # 统计信息
         total_viz = len(visualizations)
         wms_count = len([v for v in visualizations.values() if v['type'] == 'wms'])
-        wfs_count = len([v for v in visualizations.values() if v['type'] == 'geojson'])  # WFS数据以geojson形式存储
+        wfs_count = len([v for v in visualizations.values() if v['type'] == 'geojson'])
         composite_count = len([v for v in visualizations.values() if v['type'] == 'composite'])
+        
+        # 计算图层总数（包括复合可视化中的图层）
+        total_layers = 0
+        for viz in visualizations.values():
+            if viz['type'] == 'composite':
+                total_layers += len(viz.get('layers', []))
+            else:
+                total_layers += 1
         
         # 生成可视化列表HTML
         viz_list_html = ""
         if visualizations:
+            # 按创建时间排序，最新的在前
+            sorted_viz = sorted(
+                visualizations.items(), 
+                key=lambda x: x[1].get('created_at', 0), 
+                reverse=True
+            )
+            
             viz_list_html = "<div class='visualization-grid'>"
-            for viz_id, viz_info in visualizations.items():
+            for viz_id, viz_info in sorted_viz:
                 viz_list_html += self._generate_viz_card(viz_id, viz_info)
             viz_list_html += "</div>"
         else:
@@ -43,7 +57,10 @@ class WebTemplates:
             <div class='empty-state'>
                 <div class='empty-icon'>🗺️</div>
                 <h3>暂无可视化内容</h3>
-                <p>使用MCP工具生成地图可视化后，结果将在这里显示</p>
+                <p>使用MCP工具生成复合地图可视化后，结果将在这里显示</p>
+                <div class='empty-actions'>
+                    <p class='empty-hint'>支持的图层类型：WMS、WMTS、WFS、GeoJSON</p>
+                </div>
             </div>
             """
         
@@ -52,7 +69,7 @@ class WebTemplates:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>OGC Web可视化服务器</title>
+    <title>OGC 复合地图可视化服务器</title>
     <style>
         * {{
             margin: 0;
@@ -96,7 +113,7 @@ class WebTemplates:
         
         .stats {{
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
             gap: 20px;
             padding: 30px;
             background: #f8f9fa;
@@ -139,55 +156,67 @@ class WebTemplates:
             margin-bottom: 20px;
             padding-bottom: 10px;
             border-bottom: 2px solid #3498db;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }}
+        
+        .section-title::before {{
+            content: "🗺️";
+            font-size: 0.8em;
         }}
         
         .visualization-grid {{
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
-            gap: 20px;
+            grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+            gap: 25px;
             margin-top: 20px;
         }}
         
         .viz-card {{
             background: white;
             border: 1px solid #e1e8ed;
-            border-radius: 8px;
+            border-radius: 12px;
             overflow: hidden;
             transition: all 0.3s;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
         }}
         
         .viz-card:hover {{
-            transform: translateY(-4px);
-            box-shadow: 0 8px 25px rgba(0,0,0,0.15);
+            transform: translateY(-6px);
+            box-shadow: 0 12px 30px rgba(0,0,0,0.15);
         }}
         
         .viz-header {{
             padding: 20px;
             background: linear-gradient(135deg, #3498db, #2980b9);
             color: white;
+            position: relative;
         }}
         
         .viz-type {{
             display: inline-block;
-            background: rgba(255,255,255,0.2);
-            padding: 4px 12px;
+            background: rgba(255,255,255,0.25);
+            padding: 6px 14px;
             border-radius: 20px;
-            font-size: 0.8em;
+            font-size: 0.75em;
             text-transform: uppercase;
             letter-spacing: 1px;
-            margin-bottom: 10px;
+            margin-bottom: 12px;
+            font-weight: 600;
         }}
         
         .viz-title {{
-            font-size: 1.2em;
+            font-size: 1.3em;
             font-weight: bold;
-            margin-bottom: 5px;
+            margin-bottom: 8px;
+            line-height: 1.3;
         }}
         
         .viz-subtitle {{
             opacity: 0.9;
             font-size: 0.9em;
+            line-height: 1.4;
         }}
         
         .viz-body {{
@@ -203,39 +232,42 @@ class WebTemplates:
         
         .info-item {{
             background: #f8f9fa;
-            padding: 10px;
-            border-radius: 4px;
+            padding: 12px;
+            border-radius: 6px;
             border-left: 3px solid #3498db;
         }}
         
         .info-label {{
-            font-size: 0.8em;
+            font-size: 0.75em;
             color: #666;
             text-transform: uppercase;
             letter-spacing: 1px;
-            margin-bottom: 5px;
+            margin-bottom: 6px;
+            font-weight: 600;
         }}
         
         .info-value {{
             font-weight: bold;
             color: #2c3e50;
+            font-size: 0.95em;
         }}
         
         .viz-actions {{
             display: flex;
-            gap: 10px;
+            gap: 12px;
         }}
         
         .btn {{
             flex: 1;
-            padding: 10px 20px;
+            padding: 12px 20px;
             border: none;
-            border-radius: 4px;
+            border-radius: 6px;
             text-decoration: none;
             text-align: center;
-            font-weight: bold;
+            font-weight: 600;
             transition: all 0.2s;
             cursor: pointer;
+            font-size: 0.9em;
         }}
         
         .btn-primary {{
@@ -245,6 +277,7 @@ class WebTemplates:
         
         .btn-primary:hover {{
             background: #2980b9;
+            transform: translateY(-1px);
         }}
         
         .btn-secondary {{
@@ -265,6 +298,7 @@ class WebTemplates:
         .empty-icon {{
             font-size: 4em;
             margin-bottom: 20px;
+            opacity: 0.5;
         }}
         
         .empty-state h3 {{
@@ -273,106 +307,118 @@ class WebTemplates:
             color: #2c3e50;
         }}
         
-        .footer {{
-            background: #2c3e50;
-            color: white;
-            text-align: center;
-            padding: 20px;
-            margin-top: 40px;
+        .empty-state p {{
+            font-size: 1.1em;
+            margin-bottom: 20px;
         }}
         
-        .api-info {{
-            background: #e8f4fd;
-            border: 1px solid #bee5eb;
-            border-radius: 8px;
-            padding: 20px;
+        .empty-actions {{
             margin-top: 30px;
         }}
         
-        .api-title {{
-            color: #0c5460;
-            font-weight: bold;
-            margin-bottom: 10px;
+        .empty-hint {{
+            background: #e8f4fd;
+            color: #2980b9;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #3498db;
+            font-size: 0.95em !important;
+            margin: 0 !important;
         }}
         
-        .api-url {{
-            background: #d1ecf1;
-            padding: 8px 12px;
-            border-radius: 4px;
-            font-family: monospace;
-            color: #0c5460;
+        .layer-count {{
+            background: rgba(255,255,255,0.2);
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 0.8em;
+            margin-left: 8px;
         }}
         
-        .layer-list {{
-            background: #f8f9fa;
-            border-radius: 4px;
-            padding: 8px;
-            margin-top: 8px;
-            font-size: 0.85em;
+        .composite-layers {{
+            grid-column: 1 / -1;
+            background: #e8f4fd;
+            padding: 12px;
+            border-radius: 6px;
+            border-left: 3px solid #3498db;
         }}
         
-        .layer-item {{
-            padding: 2px 0;
-            color: #666;
+        .composite-layers .info-label {{
+            color: #2980b9;
+        }}
+        
+        .composite-layers .info-value {{
+            color: #2c3e50;
+            font-size: 0.9em;
+        }}
+        
+        @media (max-width: 768px) {{
+            .visualization-grid {{
+                grid-template-columns: 1fr;
+            }}
+            
+            .stats {{
+                grid-template-columns: repeat(2, 1fr);
+            }}
+            
+            .viz-info {{
+                grid-template-columns: 1fr;
+            }}
         }}
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>🌍 OGC Web可视化服务器</h1>
-            <p>统一的地理空间数据可视化平台</p>
+            <h1>OGC 复合地图可视化</h1>
+            <p>多图层地理信息可视化平台 - 支持 WMS、WMTS、WFS、GeoJSON</p>
         </div>
         
         <div class="stats">
             <div class="stat-card">
                 <div class="stat-number">{total_viz}</div>
-                <div class="stat-label">总可视化</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-number">{wms_count}</div>
-                <div class="stat-label">WMS地图</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-number">{wfs_count}</div>
-                <div class="stat-label">WFS地图</div>
+                <div class="stat-label">可视化总数</div>
             </div>
             <div class="stat-card">
                 <div class="stat-number">{composite_count}</div>
                 <div class="stat-label">复合地图</div>
             </div>
-        </div>
-        
-        <div class="content">
-            <h2 class="section-title">📊 可视化内容</h2>
-            {viz_list_html}
-            
-            <div class="api-info">
-                <div class="api-title">🔗 API接口</div>
-                <div class="api-url">{server_info['base_url']}/api/visualizations</div>
+            <div class="stat-card">
+                <div class="stat-number">{total_layers}</div>
+                <div class="stat-label">图层总数</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-number">{server_info.get('port', 8080)}</div>
+                <div class="stat-label">服务端口</div>
             </div>
         </div>
         
-        <div class="footer">
-            <p>© 2024 OGC MCP服务器 | 地理空间数据可视化平台</p>
+        <div class="content">
+            <h2 class="section-title">可视化列表</h2>
+            {viz_list_html}
         </div>
     </div>
     
     <script>
         // 自动刷新页面（每30秒）
-        setTimeout(function() {{
+        setTimeout(() => {{
             location.reload();
         }}, 30000);
         
-        // 添加一些交互效果
-        document.addEventListener('DOMContentLoaded', function() {{
-            console.log('OGC Web可视化服务器已加载');
-        }});
-        
-        function copyUrl(url) {{
-            navigator.clipboard.writeText(url).then(function() {{
-                alert('链接已复制到剪贴板');
-            }});
+        // 删除可视化
+        function deleteVisualization(vizId) {{
+            if (confirm('确定要删除这个可视化吗？')) {{
+                fetch(`/api/visualizations/${{vizId}}`, {{
+                    method: 'DELETE'
+                }})
+                .then(response => response.json())
+                .then(data => {{
+                    alert('删除成功');
+                    location.reload();
+                }})
+                .catch(error => {{
+                    alert('删除失败: ' + error);
+                }});
+            }}
         }}
     </script>
 </body>
@@ -473,114 +519,76 @@ class WebTemplates:
             viz_info: 可视化信息
             
         Returns:
-            卡片HTML
+            可视化卡片HTML
         """
-        viz_type = viz_info['type'].upper()
-        layer_name = viz_info['layer_name']
-        layer_info = viz_info['layer_info']
-        created_time = datetime.fromtimestamp(viz_info['created_at']).strftime('%Y-%m-%d %H:%M:%S')
+        viz_type = viz_info.get('type', 'unknown')
+        layer_name = viz_info.get('layer_name', '未知图层')
+        layer_info = viz_info.get('layer_info', {})
+        created_at = viz_info.get('created_at_formatted', '未知时间')
         
-        # 根据类型设置不同的样式
-        if viz_type == "WMS":
-            type_color = "#3498db"
-            type_icon = "🗺️"
-        elif viz_type == "GEOJSON":
-            # GEOJSON实际上是WFS数据的展示形式
-            type_color = "#27ae60"
-            type_icon = "📍"
-            viz_type = "WFS"  # 显示为WFS
-        elif viz_type == "COMPOSITE":
-            type_color = "#e74c3c"
-            type_icon = "🌐"
-        else:
-            type_color = "#95a5a6"
-            type_icon = "📊"
-        
-        # 获取统计信息
-        stats_html = ""
-        if viz_info['type'] == "geojson" and 'geojson_stats' in viz_info:  # 内部仍使用geojson判断
-            stats = viz_info['geojson_stats']
-            stats_html = f"""
-            <div class="info-item">
-                <div class="info-label">要素数量</div>
-                <div class="info-value">{stats.get('feature_count', 0)}</div>
-            </div>
-            <div class="info-item">
-                <div class="info-label">几何类型</div>
-                <div class="info-value">{', '.join(stats.get('geometry_types', []))}</div>
-            </div>
-            """
-        elif viz_type == "COMPOSITE" and 'layers' in viz_info:
-            layers = viz_info['layers']
-            # 优化图层类型显示
-            layer_types = []
-            for layer in layers:
-                if layer['type'] == 'geojson':
-                    layer_types.append('WFS')
-                else:
-                    layer_types.append(layer['type'].upper())
+        # 根据类型设置不同的显示信息
+        if viz_type == 'composite':
+            layers = viz_info.get('layers', [])
+            layer_count = len(layers)
+            type_display = f"复合地图 ({layer_count} 图层)"
             
-            stats_html = f"""
-            <div class="info-item">
-                <div class="info-label">图层数量</div>
-                <div class="info-value">{len(layers)}</div>
-            </div>
-            <div class="info-item">
-                <div class="info-label">图层类型</div>
-                <div class="info-value">{', '.join(set(layer_types))}</div>
-            </div>
-            """
-            # 添加图层列表，显示来源信息
-            layer_list_html = '<div class="layer-list">'
+            # 统计不同类型的图层
+            layer_types = {}
             for layer in layers:
-                layer_type = 'WFS' if layer['type'] == 'geojson' else layer['type'].upper()
-                layer_source = layer.get('layer_info', {}).get('service_name', '未知来源')
-                layer_list_html += f'<div class="layer-item">• {layer.get("name", "未命名图层")} ({layer_type} - {layer_source})</div>'
-            layer_list_html += '</div>'
-            stats_html += f"""
-            <div class="info-item" style="grid-column: 1 / -1;">
-                <div class="info-label">包含图层</div>
-                {layer_list_html}
-            </div>
+                layer_type = layer.get('type', 'unknown')
+                layer_types[layer_type] = layer_types.get(layer_type, 0) + 1
+            
+            layer_summary = ", ".join([f"{count}个{type_name.upper()}" 
+                                     for type_name, count in layer_types.items()])
+            
+            info_items = f"""
+                <div class="info-item">
+                    <div class="info-label">图层数量</div>
+                    <div class="info-value">{layer_count} 个</div>
+                </div>
+                <div class="info-item">
+                    <div class="info-label">创建时间</div>
+                    <div class="info-value">{created_at}</div>
+                </div>
+                <div class="composite-layers">
+                    <div class="info-label">图层组成</div>
+                    <div class="info-value">{layer_summary}</div>
+                </div>
             """
         else:
-            stats_html = f"""
-            <div class="info-item">
-                <div class="info-label">服务类型</div>
-                <div class="info-value">{viz_type}</div>
-            </div>
-            <div class="info-item">
-                <div class="info-label">坐标系</div>
-                <div class="info-value">{layer_info.get('crs', 'EPSG:4326')}</div>
-            </div>
+            type_display = viz_type.upper()
+            service_name = layer_info.get('service_name', '未知服务')
+            crs = layer_info.get('crs', 'EPSG:4326')
+            
+            info_items = f"""
+                <div class="info-item">
+                    <div class="info-label">服务名称</div>
+                    <div class="info-value">{service_name}</div>
+                </div>
+                <div class="info-item">
+                    <div class="info-label">坐标系统</div>
+                    <div class="info-value">{crs}</div>
+                </div>
+                <div class="info-item">
+                    <div class="info-label">创建时间</div>
+                    <div class="info-value">{created_at}</div>
+                </div>
             """
         
         return f"""
         <div class="viz-card">
-            <div class="viz-header" style="background: linear-gradient(135deg, {type_color}, {type_color}dd);">
-                <div class="viz-type">{type_icon} {viz_type}</div>
-                <div class="viz-title">{layer_info.get('layer_title', layer_name)}</div>
-                <div class="viz-subtitle">{layer_info.get('service_name', 'N/A')}</div>
+            <div class="viz-header">
+                <div class="viz-type">{type_display}</div>
+                <div class="viz-title">{layer_name}</div>
+                <div class="viz-subtitle">{layer_info.get('layer_title', '')}</div>
             </div>
             <div class="viz-body">
                 <div class="viz-info">
-                    {stats_html}
-                    <div class="info-item">
-                        <div class="info-label">创建时间</div>
-                        <div class="info-value">{created_time}</div>
-                    </div>
-                    <div class="info-item">
-                        <div class="info-label">图层名称</div>
-                        <div class="info-value">{layer_name}</div>
-                    </div>
+                    {info_items}
                 </div>
                 <div class="viz-actions">
-                    <a href="{viz_info['url']}" class="btn btn-primary" target="_blank">
-                        🔍 查看地图
-                    </a>
-                    <button class="btn btn-secondary" onclick="copyUrl('{viz_info['url']}')">
-                        📋 复制链接
-                    </button>
+                    <a href="{viz_info['url']}" class="btn btn-primary" target="_blank">查看地图</a>
+                    <button onclick="deleteVisualization('{viz_id}')" class="btn btn-secondary">删除</button>
                 </div>
             </div>
         </div>

@@ -680,51 +680,150 @@ class CompositeHandler:
         }
     
     def calculate_map_bounds(self, layers: List[Dict[str, Any]]) -> Optional[Dict[str, float]]:
-        """计算地图边界"""
+        """计算地图边界
+        
+        Args:
+            layers: 图层列表
+            
+        Returns:
+            地图边界信息，包含north、south、east、west
+        """
         bounds = {"north": -90, "south": 90, "east": -180, "west": 180}
         has_bounds = False
         
         for layer in layers:
-            if layer["type"] in ["wms", "wmts"] and layer.get("bbox"):
-                bbox = layer["bbox"]
-                if len(bbox) == 4:
-                    bounds["west"] = min(bounds["west"], bbox[0])
-                    bounds["south"] = min(bounds["south"], bbox[1])
-                    bounds["east"] = max(bounds["east"], bbox[2])
-                    bounds["north"] = max(bounds["north"], bbox[3])
-                    has_bounds = True
-                    
-            elif layer["type"] == "geojson" and layer.get("geojson_data"):
-                # 从GeoJSON数据计算边界
-                geojson = layer["geojson_data"]
-                if geojson.get("features"):
-                    for feature in geojson["features"]:
-                        geometry = feature.get("geometry", {})
-                        if geometry.get("coordinates"):
-                            coords = self._extract_coordinates(geometry["coordinates"])
-                            for coord in coords:
-                                if len(coord) >= 2:
-                                    lon, lat = coord[0], coord[1]
-                                    bounds["west"] = min(bounds["west"], lon)
-                                    bounds["east"] = max(bounds["east"], lon)
-                                    bounds["south"] = min(bounds["south"], lat)
-                                    bounds["north"] = max(bounds["north"], lat)
-                                    has_bounds = True
+            layer_bounds = self._get_layer_bounds(layer)
+            if layer_bounds:
+                bounds["west"] = min(bounds["west"], layer_bounds["west"])
+                bounds["south"] = min(bounds["south"], layer_bounds["south"])
+                bounds["east"] = max(bounds["east"], layer_bounds["east"])
+                bounds["north"] = max(bounds["north"], layer_bounds["north"])
+                has_bounds = True
         
-        return bounds if has_bounds else None
+        # 验证边界的有效性
+        if has_bounds and self._is_valid_bounds(bounds):
+            return bounds
+        
+        return None
     
-    def _extract_coordinates(self, coords) -> List[List[float]]:
-        """递归提取坐标"""
-        result = []
-        if isinstance(coords, list):
-            if len(coords) > 0 and isinstance(coords[0], (int, float)):
-                # 这是一个坐标点
-                result.append(coords)
-            else:
-                # 这是坐标数组
-                for item in coords:
-                    result.extend(self._extract_coordinates(item))
-        return result
+    def _get_layer_bounds(self, layer: Dict[str, Any]) -> Optional[Dict[str, float]]:
+        """获取单个图层的边界
+        
+        Args:
+            layer: 图层信息
+            
+        Returns:
+            图层边界信息
+        """
+        layer_type = layer.get("type", "")
+        
+        if layer_type in ["wms", "wmts"]:
+            return self._get_ogc_layer_bounds(layer)
+        elif layer_type == "geojson":
+            return self._get_geojson_bounds(layer)
+        
+        return None
+    
+    def _get_ogc_layer_bounds(self, layer: Dict[str, Any]) -> Optional[Dict[str, float]]:
+        """获取OGC图层（WMS/WMTS）的边界
+        
+        Args:
+            layer: OGC图层信息
+            
+        Returns:
+            图层边界信息
+        """
+        # 优先使用动态边界框
+        layer_info = layer.get("layer_info", {})
+        dynamic_bbox = layer_info.get("dynamic_bbox")
+        
+        if dynamic_bbox and len(dynamic_bbox) == 4:
+            return {
+                "west": dynamic_bbox[0],
+                "south": dynamic_bbox[1], 
+                "east": dynamic_bbox[2],
+                "north": dynamic_bbox[3]
+            }
+        
+        # 使用静态边界框
+        bbox = layer.get("bbox") or layer_info.get("bbox")
+        if bbox and len(bbox) == 4:
+            return {
+                "west": bbox[0],
+                "south": bbox[1],
+                "east": bbox[2], 
+                "north": bbox[3]
+            }
+        
+        return None
+    
+    def _get_geojson_bounds(self, layer: Dict[str, Any]) -> Optional[Dict[str, float]]:
+        """获取GeoJSON图层的边界
+        
+        Args:
+            layer: GeoJSON图层信息
+            
+        Returns:
+            图层边界信息
+        """
+        geojson_data = layer.get("geojson_data", {})
+        if not geojson_data.get("features"):
+            return None
+        
+        bounds = {"north": -90, "south": 90, "east": -180, "west": 180}
+        has_coords = False
+        
+        for feature in geojson_data["features"]:
+            geometry = feature.get("geometry", {})
+            if geometry.get("coordinates"):
+                coords = self._extract_coordinates(geometry["coordinates"])
+                for coord in coords:
+                    if len(coord) >= 2:
+                        lon, lat = coord[0], coord[1]
+                        # 验证坐标有效性
+                        if -180 <= lon <= 180 and -90 <= lat <= 90:
+                            bounds["west"] = min(bounds["west"], lon)
+                            bounds["east"] = max(bounds["east"], lon)
+                            bounds["south"] = min(bounds["south"], lat)
+                            bounds["north"] = max(bounds["north"], lat)
+                            has_coords = True
+        
+        return bounds if has_coords else None
+    
+    def _is_valid_bounds(self, bounds: Dict[str, float]) -> bool:
+        """验证边界的有效性
+        
+        Args:
+            bounds: 边界信息
+            
+        Returns:
+            边界是否有效
+        """
+        try:
+            # 检查边界值的合理性
+            if (bounds["west"] >= bounds["east"] or 
+                bounds["south"] >= bounds["north"]):
+                return False
+            
+            # 检查坐标范围
+            if (bounds["west"] < -180 or bounds["east"] > 180 or
+                bounds["south"] < -90 or bounds["north"] > 90):
+                return False
+            
+            # 检查边界大小是否合理（不能太小或太大）
+            width = bounds["east"] - bounds["west"]
+            height = bounds["north"] - bounds["south"]
+            
+            if width < 0.0001 or height < 0.0001:  # 太小
+                return False
+            
+            if width > 360 or height > 180:  # 太大
+                return False
+            
+            return True
+            
+        except (KeyError, TypeError, ValueError):
+            return False
 
 
 class LayerHandler:

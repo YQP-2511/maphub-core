@@ -223,6 +223,7 @@ def _calculate_intelligent_map_config(
     
     基于图层信息和AI智能分析计算最佳的地图中心点、缩放级别和边界框
     优先选择最重要的图层作为中心点参考
+    增强对WMS和WMTS图层的支持
     """
     config = {
         "width": 1200,
@@ -246,21 +247,165 @@ def _calculate_intelligent_map_config(
             "type": primary_layer.get("type")
         }
         
-        # 使用主要图层的边界框计算中心点
-        primary_bbox = primary_layer.get("bbox")
-        if primary_bbox and len(primary_bbox) == 4:
-            if _is_valid_bbox(primary_bbox):
-                center_config = _calculate_center_from_bbox(primary_bbox)
-                config.update(center_config)
-                
-                # 根据主要图层类型调整缩放级别
-                zoom_adjustment = _get_zoom_adjustment_for_layer(primary_layer)
-                config["zoom"] = min(config["zoom"] + zoom_adjustment, 18)
-                
-                return config
+        # 使用主要图层的有效边界框计算中心点
+        primary_bbox = _get_effective_bbox(primary_layer)
+        if primary_bbox and _is_valid_bbox(primary_bbox):
+            center_config = _calculate_center_from_bbox(primary_bbox)
+            config.update(center_config)
+            
+            # 根据主要图层类型和特征调整缩放级别
+            zoom_adjustment = _get_enhanced_zoom_adjustment(primary_layer, layers)
+            config["zoom"] = min(config["zoom"] + zoom_adjustment, 18)
+            
+            # 记录使用的边界框来源
+            config["bbox_source"] = _get_bbox_source_info(primary_layer)
+            
+            return config
     
-    # 如果没有找到合适的主要图层，使用原有的合并逻辑
-    return _calculate_fallback_map_config(layers)
+    # 如果没有找到合适的主要图层，使用增强的合并逻辑
+    return _calculate_enhanced_fallback_config(layers)
+
+
+def _get_enhanced_zoom_adjustment(primary_layer: Dict[str, Any], all_layers: List[Dict[str, Any]]) -> int:
+    """根据主要图层和整体图层情况获取增强的缩放级别调整值"""
+    layer_type = primary_layer.get("type", "").lower()
+    adjustment = 0
+    
+    # 基础调整
+    if layer_type == "wfs":
+        feature_count = len(primary_layer.get("geojson_data", {}).get("features", []))
+        if feature_count <= 10:
+            adjustment += 2  # 少量要素，放大更多
+        elif feature_count <= 100:
+            adjustment += 1  # 适量要素，稍微放大
+        else:
+            adjustment += 0  # 大量要素，保持原缩放
+    elif layer_type == "wms":
+        # WMS图层根据是否可查询调整
+        if primary_layer.get("queryable", False):
+            adjustment += 1  # 可查询的WMS可以放大一些
+        else:
+            adjustment += 0  # 不可查询的保持原缩放
+    elif layer_type == "wmts":
+        # WMTS图层通常是背景图，稍微缩小
+        adjustment -= 1
+    
+    # 根据图层组合情况调整
+    layer_types = [layer.get("type", "").lower() for layer in all_layers]
+    
+    # 如果有多种类型的图层，适当缩小以显示更多内容
+    unique_types = set(layer_types)
+    if len(unique_types) > 1:
+        adjustment -= 1
+    
+    # 如果主要图层是区域性的，但还有全球性图层，需要平衡
+    primary_bbox = _get_effective_bbox(primary_layer)
+    if primary_bbox:
+        primary_area = abs((primary_bbox[2] - primary_bbox[0]) * (primary_bbox[3] - primary_bbox[1]))
+        
+        # 检查是否有全球性图层
+        has_global_layer = False
+        for layer in all_layers:
+            if layer != primary_layer:
+                layer_bbox = _get_effective_bbox(layer)
+                if layer_bbox:
+                    layer_area = abs((layer_bbox[2] - layer_bbox[0]) * (layer_bbox[3] - layer_bbox[1]))
+                    if layer_area > 100:  # 全球级别
+                        has_global_layer = True
+                        break
+        
+        # 如果主要图层是区域性的，但有全球图层，稍微缩小以兼顾
+        if primary_area < 10 and has_global_layer:
+            adjustment -= 1
+    
+    return adjustment
+
+
+def _get_bbox_source_info(layer: Dict[str, Any]) -> Dict[str, Any]:
+    """获取边界框来源信息"""
+    source_info = {
+        "type": "unknown",
+        "is_dynamic": False,
+        "crs": "EPSG:4326"
+    }
+    
+    # 检查是否使用动态边界框
+    if layer.get("dynamic_bbox"):
+        source_info["is_dynamic"] = True
+        source_info["type"] = "dynamic"
+    elif layer.get("bbox"):
+        source_info["type"] = "static"
+    
+    # 获取坐标系信息
+    if layer.get("default_crs"):
+        source_info["crs"] = layer["default_crs"]
+    
+    return source_info
+
+
+def _calculate_enhanced_fallback_config(layers: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """增强的备用地图配置计算
+    
+    当没有找到合适的主要图层时，使用更智能的合并策略
+    """
+    config = {
+        "width": 1200,
+        "height": 800,
+        "center": [39.9042, 116.4074],  # 默认北京
+        "zoom": 10,
+        "bbox": None,
+        "bbox_source": {"type": "merged", "is_dynamic": False}
+    }
+    
+    # 收集有效的边界框，按图层类型分组
+    wfs_bboxes = []
+    wms_bboxes = []
+    wmts_bboxes = []
+    
+    for layer in layers:
+        bbox = _get_effective_bbox(layer)
+        if bbox and _is_valid_bbox(bbox):
+            layer_type = layer.get("type", "").lower()
+            if layer_type == "wfs":
+                wfs_bboxes.append(bbox)
+            elif layer_type == "wms":
+                wms_bboxes.append(bbox)
+            elif layer_type == "wmts":
+                wmts_bboxes.append(bbox)
+    
+    # 优先使用矢量数据的边界框
+    if wfs_bboxes:
+        merged_bbox = _merge_bboxes(wfs_bboxes)
+        center_config = _calculate_center_from_bbox(merged_bbox)
+        config.update(center_config)
+        config["zoom"] = min(config["zoom"] + 1, 18)  # 矢量数据可以放大一些
+        config["bbox_source"]["primary_type"] = "wfs"
+    elif wms_bboxes:
+        merged_bbox = _merge_bboxes(wms_bboxes)
+        center_config = _calculate_center_from_bbox(merged_bbox)
+        config.update(center_config)
+        config["bbox_source"]["primary_type"] = "wms"
+    elif wmts_bboxes:
+        merged_bbox = _merge_bboxes(wmts_bboxes)
+        center_config = _calculate_center_from_bbox(merged_bbox)
+        config.update(center_config)
+        config["zoom"] = max(config["zoom"] - 1, 1)  # 瓦片数据稍微缩小
+        config["bbox_source"]["primary_type"] = "wmts"
+    
+    return config
+
+
+def _merge_bboxes(bboxes: List[List[float]]) -> List[float]:
+    """合并多个边界框"""
+    if not bboxes:
+        return [116.0, 39.5, 117.0, 40.5]  # 默认北京区域
+    
+    min_lon = min(bbox[0] for bbox in bboxes)
+    min_lat = min(bbox[1] for bbox in bboxes)
+    max_lon = max(bbox[2] for bbox in bboxes)
+    max_lat = max(bbox[3] for bbox in bboxes)
+    
+    return [min_lon, min_lat, max_lon, max_lat]
 
 
 def _select_primary_layer_with_ai(layers: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -269,8 +414,9 @@ def _select_primary_layer_with_ai(layers: List[Dict[str, Any]]) -> Optional[Dict
     基于多个因素评估图层重要性：
     1. 图层类型优先级（WFS > WMS > WMTS）
     2. 数据丰富度（要素数量、属性数量）
-    3. 空间范围合理性
+    3. 空间范围合理性（重点优化）
     4. 图层名称语义分析
+    5. 动态边界框和实时数据评分（增强）
     """
     if not layers:
         return None
@@ -285,19 +431,19 @@ def _select_primary_layer_with_ai(layers: List[Dict[str, Any]]) -> Optional[Dict
             "reasons": []
         }
         
-        # 1. 图层类型评分（WFS最高，因为包含详细的矢量数据）
+        # 1. 图层类型评分（调整权重，更好支持WMS/WMTS）
         layer_type = layer.get("type", "").lower()
         if layer_type == "wfs":
             score += 100
             layer_info["reasons"].append("WFS矢量图层(+100)")
         elif layer_type == "wms":
-            score += 70
-            layer_info["reasons"].append("WMS栅格图层(+70)")
+            score += 80  # 提高WMS权重
+            layer_info["reasons"].append("WMS栅格图层(+80)")
         elif layer_type == "wmts":
-            score += 50
-            layer_info["reasons"].append("WMTS瓦片图层(+50)")
+            score += 60  # 提高WMTS权重
+            layer_info["reasons"].append("WMTS瓦片图层(+60)")
         
-        # 2. 数据丰富度评分
+        # 2. 数据丰富度评分（扩展到所有图层类型）
         if layer_type == "wfs":
             # WFS图层：基于要素数量
             geojson_data = layer.get("geojson_data", {})
@@ -320,47 +466,114 @@ def _select_primary_layer_with_ai(layers: List[Dict[str, Any]]) -> Optional[Dict
                 score += 20
                 layer_info["reasons"].append(f"属性丰富({len(attributes)}个属性, +20)")
         
-        # 3. 边界框合理性评分
-        bbox = layer.get("bbox")
+        elif layer_type == "wms":
+            # WMS图层：基于样式和格式丰富度
+            styles = layer.get("styles", [])
+            formats = layer.get("formats", [])
+            if len(styles) > 1:
+                score += 15
+                layer_info["reasons"].append(f"样式丰富({len(styles)}个样式, +15)")
+            if len(formats) > 2:
+                score += 10
+                layer_info["reasons"].append(f"格式多样({len(formats)}个格式, +10)")
+            
+            # 可查询性加分
+            if layer.get("queryable", False):
+                score += 25
+                layer_info["reasons"].append("支持查询(+25)")
+        
+        elif layer_type == "wmts":
+            # WMTS图层：基于瓦片矩阵集和样式
+            matrix_sets = layer.get("tile_matrix_sets", [])
+            styles = layer.get("styles", [])
+            if len(matrix_sets) > 1:
+                score += 15
+                layer_info["reasons"].append(f"瓦片矩阵集丰富({len(matrix_sets)}个, +15)")
+            if len(styles) > 1:
+                score += 10
+                layer_info["reasons"].append(f"样式多样({len(styles)}个, +10)")
+        
+        # 3. 空间范围合理性评分（重点优化）
+        bbox = _get_effective_bbox(layer)  # 新函数：获取有效边界框
         if bbox and _is_valid_bbox(bbox):
             bbox_area = abs((bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
             
-            # 面积合理性评分（避免过大或过小的区域）
-            if 0.001 <= bbox_area <= 100:  # 合理的地理范围
+            # 更精细的面积合理性评分
+            if 0.0001 <= bbox_area <= 0.01:  # 城市/区域级别（最佳）
+                score += 50
+                layer_info["reasons"].append(f"区域级空间范围(面积:{bbox_area:.6f}, +50)")
+            elif 0.01 < bbox_area <= 1:  # 省/州级别
+                score += 40
+                layer_info["reasons"].append(f"省级空间范围(面积:{bbox_area:.4f}, +40)")
+            elif 1 < bbox_area <= 100:  # 国家级别
                 score += 30
-                layer_info["reasons"].append(f"空间范围合理(面积:{bbox_area:.4f}, +30)")
-            elif bbox_area < 0.001:
-                score += 10  # 太小的区域
-                layer_info["reasons"].append(f"空间范围较小(面积:{bbox_area:.6f}, +10)")
-            else:
-                score += 5   # 太大的区域
-                layer_info["reasons"].append(f"空间范围较大(面积:{bbox_area:.2f}, +5)")
+                layer_info["reasons"].append(f"国家级空间范围(面积:{bbox_area:.2f}, +30)")
+            elif bbox_area > 100:  # 全球级别（降低权重）
+                score += 10
+                layer_info["reasons"].append(f"全球级空间范围(面积:{bbox_area:.2f}, +10)")
+            else:  # 太小的区域
+                score += 20
+                layer_info["reasons"].append(f"精细空间范围(面积:{bbox_area:.8f}, +20)")
         
-        # 4. 图层名称语义分析
+        # 4. 图层名称语义分析（扩展关键词）
         layer_name = layer.get("name", "").lower()
         layer_title = layer.get("title", "").lower()
         
-        # 重要关键词检测
-        important_keywords = [
-            "states", "countries", "cities", "roads", "buildings", 
-            "boundaries", "administrative", "population", "economic"
+        # 重要关键词检测（按重要性分级）
+        high_priority_keywords = [
+            "administrative", "boundaries", "cities", "urban", "population", 
+            "districts", "regions", "provinces", "counties"
+        ]
+        medium_priority_keywords = [
+            "states", "countries", "roads", "buildings", "economic", 
+            "land_use", "infrastructure", "transport"
+        ]
+        low_priority_keywords = [
+            "background", "basemap", "satellite", "imagery", "terrain"
         ]
         
-        for keyword in important_keywords:
+        # 高优先级关键词
+        for keyword in high_priority_keywords:
+            if keyword in layer_name or keyword in layer_title:
+                score += 25
+                layer_info["reasons"].append(f"高优先级关键词'{keyword}'(+25)")
+                break
+        
+        # 中优先级关键词
+        for keyword in medium_priority_keywords:
             if keyword in layer_name or keyword in layer_title:
                 score += 15
-                layer_info["reasons"].append(f"包含重要关键词'{keyword}'(+15)")
+                layer_info["reasons"].append(f"中优先级关键词'{keyword}'(+15)")
+                break
+        
+        # 低优先级关键词（背景图层）
+        for keyword in low_priority_keywords:
+            if keyword in layer_name or keyword in layer_title:
+                score -= 10  # 降低背景图层的权重
+                layer_info["reasons"].append(f"背景图层关键词'{keyword}'(-10)")
                 break
         
         # 5. 过滤器应用评分（有过滤器说明用户关注此图层）
         if layer.get("filter_info", {}).get("cql_filter"):
-            score += 25
-            layer_info["reasons"].append("应用了过滤器(+25)")
+            score += 30  # 提高权重
+            layer_info["reasons"].append("应用了过滤器(+30)")
         
-        # 6. 动态边界框评分（说明图层有实时数据）
+        # 6. 动态边界框评分（增强对WMS/WMTS的支持）
         if layer.get("dynamic_bbox") or layer.get("bbox_source") == "dynamic":
+            score += 20  # 提高权重
+            layer_info["reasons"].append("具有动态边界框(+20)")
+        
+        # 7. 新增：图层数据新鲜度评分
+        metadata = layer.get("metadata", {})
+        if metadata.get("last_updated"):
+            score += 10
+            layer_info["reasons"].append("数据有更新时间(+10)")
+        
+        # 8. 新增：多坐标系支持评分
+        crs_list = layer.get("crs_list", [])
+        if len(crs_list) > 2:
             score += 15
-            layer_info["reasons"].append("具有动态边界框(+15)")
+            layer_info["reasons"].append(f"多坐标系支持({len(crs_list)}个CRS, +15)")
         
         layer_info["score"] = score
         layer_scores.append(layer_info)
@@ -374,6 +587,50 @@ def _select_primary_layer_with_ai(layers: List[Dict[str, Any]]) -> Optional[Dict
         logger.info(f"AI选择主要图层: {best_layer_info['layer'].get('title', 'Unknown')} "
                    f"(评分: {best_layer_info['score']}, 原因: {', '.join(best_layer_info['reasons'])})")
         return best_layer_info["layer"]
+    
+    return None
+
+
+def _get_effective_bbox(layer: Dict[str, Any]) -> Optional[List[float]]:
+    """获取图层的有效边界框
+    
+    优先使用动态边界框，然后是静态边界框
+    支持不同的边界框格式和坐标系
+    """
+    # 1. 优先使用动态边界框
+    dynamic_bbox = layer.get("dynamic_bbox")
+    if dynamic_bbox:
+        if isinstance(dynamic_bbox, dict):
+            # 优先使用WGS84坐标系的边界框
+            if "wgs84" in dynamic_bbox:
+                return dynamic_bbox["wgs84"]
+            # 或者使用第一个可用的边界框
+            for key, value in dynamic_bbox.items():
+                if isinstance(value, list) and len(value) == 4:
+                    return value
+        elif isinstance(dynamic_bbox, list) and len(dynamic_bbox) == 4:
+            return dynamic_bbox
+    
+    # 2. 使用静态边界框
+    bbox = layer.get("bbox")
+    if bbox:
+        if isinstance(bbox, dict):
+            # 优先使用WGS84坐标系的边界框
+            if "wgs84" in bbox:
+                bbox_data = bbox["wgs84"]
+                if isinstance(bbox_data, dict) and "bbox" in bbox_data:
+                    return bbox_data["bbox"]
+                elif isinstance(bbox_data, list):
+                    return bbox_data
+            
+            # 查找其他坐标系的边界框
+            for key, value in bbox.items():
+                if isinstance(value, dict) and "bbox" in value:
+                    return value["bbox"]
+                elif isinstance(value, list) and len(value) == 4:
+                    return value
+        elif isinstance(bbox, list) and len(bbox) == 4:
+            return bbox
     
     return None
 
