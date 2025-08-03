@@ -21,23 +21,45 @@ wfs_layer_server = FastMCP(name="优化WFS图层工具")
 from . import visualization_tools
 
 
-@wfs_layer_server.tool
+@wfs_layer_server.tool(
+    name="add_wfs_layer",
+    description="""添加WFS矢量图层到地图。智能检测过滤需求并自动应用。
+
+智能过滤策略：
+- 分析用户查询意图，自动识别过滤条件
+- 当查询包含具体限定词时，必须使用过滤参数
+- 支持地名、分类、数值范围等多种过滤方式
+
+使用指导：
+1. 有明确条件的查询 → 必须使用attribute_filter和filter_values
+2. 探索性查询 → 可选择性使用过滤
+3. 多条件查询 → 使用逗号分隔多个过滤值""",
+    tags={"wfs", "layer", "vector", "filter", "visualization", "intelligent"}
+)
 async def add_wfs_layer(
     layer_name: Annotated[str, Field(description="WFS图层名称")],
-    layer_title: Annotated[str, Field(description="图层显示标题，可选，默认使用图层名称")] = None,
-    max_features: Annotated[int, Field(description="最大要素数量，默认100，避免数据过载")] = 100,
-    attribute_filter: Annotated[Optional[str], Field(description="可选的属性名称，用于过滤")] = None,
-    filter_values: Annotated[Optional[str], Field(description="属性过滤值，支持多个值用逗号分隔，如：'北京,上海,广州'")] = None,
+    layer_title: Annotated[str, Field(description="图层显示标题")] = None,
+    max_features: Annotated[int, Field(description="最大要素数量，默认100")] = 100,
+    attribute_filter: Annotated[Optional[str], Field(description="属性名称，用于过滤")] = None,
+    filter_values: Annotated[Optional[str], Field(description="过滤值，多个值用逗号分隔")] = None,
     ctx: Context = None
 ) -> Dict[str, Any]:
-    """优化的WFS图层添加工具
+    """添加WFS矢量图层到地图可视化
     
-    改进点：
-    1. 简化资源访问，直接使用ctx.read_resource()
-    2. 改进URL构建和参数处理
-    3. 增强错误处理和调试信息
-    4. 优化HTTP请求配置
-    5. 支持多值过滤，用逗号分隔多个值
+    智能过滤功能：
+    - 自动检测用户查询中的过滤需求
+    - 当用户查询包含具体条件时，自动应用属性过滤
+    - 支持多值过滤和范围查询
+    
+    过滤判断逻辑：
+    1. 如果用户查询包含地名、分类、数值等限定条件，优先使用过滤
+    2. 如果提供了attribute_filter和filter_values参数，直接应用过滤
+    3. 对于探索性查询，可不使用过滤获取全部数据
+    
+    示例场景：
+    - "查看加州的人口数据" → 自动过滤STATE_NAME='California'
+    - "显示住宅用地" → 自动过滤LAND_USE='住宅'
+    - "人口超过100万的城市" → 自动过滤POPULATION>1000000
     """
     try:
         if ctx:

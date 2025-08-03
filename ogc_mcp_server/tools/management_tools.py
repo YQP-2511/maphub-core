@@ -31,11 +31,13 @@ async def register_ogc_services(
     service_type: Annotated[Optional[str], Field(description="服务类型：WMS、WFS或WMTS（可选，适用于所有服务）")] = None,
     ctx: Context = None
 ) -> Dict[str, Any]:
-    """批量注册OGC服务
+    """注册和添加OGC地理数据服务
     
-    批量解析多个OGC服务的能力文档，提取图层信息并注册到资源列表中。
-    支持WMS、WFS和WMTS服务的自动检测和解析。
-    注册完成后，新图层将自动出现在ogc://layers资源中。
+    批量注册OGC地理数据服务，包括地图服务、要素服务和瓦片服务。
+    支持自动发现和解析WMS、WFS、WMTS服务的图层信息。
+    用于添加新的地理数据源，扩展可用的地理数据集合。
+    
+    关键词：注册、添加、导入、地理数据、地图服务、数据源
     
     Args:
         service_urls: OGC服务URL列表
@@ -60,25 +62,26 @@ async def register_ogc_services(
 
 
 @management_server.tool
-async def list_layers_from_resource(
-    service_type_filter: Annotated[Optional[str], Field(description="按服务类型筛选（WMS/WFS/WMTS）")] = None,
+async def search_and_list_geographic_data(
     ctx: Context = None
 ) -> Dict[str, Any]:
-    """通过资源列出已注册的图层
+    """搜索和查找所有可用的地理数据图层
     
-    使用资源驱动的方式获取图层列表，从ogc://layers资源读取数据。
-    这是推荐的获取图层列表的方式，确保数据一致性。
-    支持WMS、WFS和WMTS服务类型的筛选。
+    搜索、查找、浏览所有已注册的地理数据图层和数据集。
+    返回完整的地理数据资源列表，包括所有类型的服务。
+    用于数据发现、数据探索、图层查找、数据检索等场景。
+    
+    关键词：搜索、查找、浏览、发现、探索、数据、图层、地理数据、人口数据、统计数据
+    适用场景：查看数据、寻找数据、数据情况、数据状况、数据概览
     
     Args:
-        service_type_filter: 按服务类型筛选（WMS/WFS/WMTS，可选）
         ctx: MCP上下文对象
         
     Returns:
-        图层资源列表和统计信息
+        所有地理数据图层列表和统计信息
     """
     if ctx:
-        await ctx.info("正在从资源获取图层列表...")
+        await ctx.info("正在搜索所有可用的地理数据图层...")
     
     try:
         # 通过资源获取图层列表
@@ -100,32 +103,33 @@ async def list_layers_from_resource(
         if isinstance(layers_data, dict) and "error" in layers_data:
             raise ValueError(f"图层资源错误: {layers_data['error']}")
         
-        # 应用筛选条件
-        filtered_layers = layers_data.get("layers", [])
-        if service_type_filter:
-            filtered_layers = [
-                layer for layer in filtered_layers 
-                if layer.get("service_type", "").upper() == service_type_filter.upper()
-            ]
+        # 获取所有图层，不进行筛选
+        all_layers = layers_data.get("layers", [])
+        
+        # 统计各类型数据
+        type_stats = {}
+        for layer in all_layers:
+            service_type = layer.get("service_type", "Unknown")
+            type_stats[service_type] = type_stats.get(service_type, 0) + 1
         
         # 构建返回结果
         result = {
-            "layers": filtered_layers,
-            "total_count": len(filtered_layers),
-            "filter_applied": {
-                "service_type": service_type_filter
-            },
-            "source": "ogc://layers resource"
+            "layers": all_layers,
+            "total_count": len(all_layers),
+            "type_statistics": type_stats,
+            "source": "ogc://layers resource",
+            "search_completed": True,
+            "data_discovery": f"发现 {len(all_layers)} 个可用的地理数据图层"
         }
         
         if ctx:
-            await ctx.info(f"获取到 {len(filtered_layers)} 个图层资源")
+            await ctx.info(f"搜索完成：发现 {len(all_layers)} 个地理数据图层")
         
-        logger.info(f"通过资源获取图层列表完成: {len(filtered_layers)} 个图层")
+        logger.info(f"地理数据搜索完成: {len(all_layers)} 个图层")
         return result
         
     except Exception as e:
-        error_msg = f"从资源获取图层列表失败: {e}"
+        error_msg = f"搜索地理数据失败: {e}"
         logger.error(error_msg)
         if ctx:
             await ctx.error(error_msg)
