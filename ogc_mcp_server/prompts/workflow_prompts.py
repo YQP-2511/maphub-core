@@ -34,7 +34,7 @@ def geo_workflow(
 1. clear_visualization_layers() - 清理现有图层
 2. search_and_list_geographic_data() - 搜索相关数据，每次任务必须执行
 3. add_wms_layer() - 添加底图
-4. add_wfs_layer() - 添加WFS图层(如果用户查询需要过滤条件，一定要过滤)
+4. add_wfs_layer_filtered() - 添加WFS图层(如果用户查询需要过滤条件，一定要过滤)
 5. create_composite_visualization() - 创建可视化，在图层添加完才能执行
 
 ⚡ 立即执行！"""
