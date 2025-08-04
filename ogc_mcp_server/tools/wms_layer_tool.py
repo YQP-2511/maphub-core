@@ -110,7 +110,10 @@ async def add_wms_layer(
 
 
 async def _get_layer_from_registry_resource(layer_name: str, ctx: Context) -> Dict[str, Any]:
-    """从layer_registry资源获取图层详细信息
+    """从layer_registry资源获取图层详细信息 - 包含图层发现功能
+    
+    先读取图层列表资源进行图层发现，然后读取详细资源
+    这样AI可以了解所有可用图层，提供更好的用户体验
     
     Args:
         layer_name: 图层名称
@@ -124,7 +127,53 @@ async def _get_layer_from_registry_resource(layer_name: str, ctx: Context) -> Di
         Exception: 资源访问错误时
     """
     try:
-        # 构建资源URI
+        # 第一步：读取图层列表资源进行图层发现
+        if ctx:
+            await ctx.debug(f"🔍 开始图层发现 - 读取图层列表资源")
+        
+        try:
+            layers_list_content = await ctx.read_resource("ogc://layers")
+            
+            # 处理图层列表内容
+            if isinstance(layers_list_content, list) and len(layers_list_content) > 0:
+                content_item = layers_list_content[0]
+                if hasattr(content_item, 'text'):
+                    layers_data = json.loads(content_item.text)
+                elif hasattr(content_item, 'content'):
+                    layers_data = json.loads(content_item.content)
+                elif isinstance(content_item, dict):
+                    layers_data = content_item
+                else:
+                    layers_data = json.loads(str(content_item))
+            elif isinstance(layers_list_content, dict):
+                layers_data = layers_list_content
+            else:
+                layers_data = json.loads(str(layers_list_content))
+            
+            # 提取图层列表
+            available_layers = layers_data.get("layers", [])
+            total_layers = layers_data.get("total", len(available_layers))
+            
+            if ctx:
+                await ctx.info(f"📋 发现 {total_layers} 个可用图层")
+                
+                # 显示部分图层名称供参考
+                layer_names = [layer.get("layer_name", "") for layer in available_layers[:10] if layer.get("layer_name")]
+                if layer_names:
+                    await ctx.debug(f"🏷️ 部分可用图层: {', '.join(layer_names)}")
+                    
+                # 检查目标图层是否在列表中
+                target_layer_found = any(layer.get("layer_name") == layer_name for layer in available_layers)
+                if target_layer_found:
+                    await ctx.info(f"✅ 目标图层 '{layer_name}' 在可用图层列表中")
+                else:
+                    await ctx.warning(f"⚠️ 目标图层 '{layer_name}' 不在当前可用图层列表中")
+                    
+        except Exception as e:
+            if ctx:
+                await ctx.warning(f"⚠️ 图层发现失败，继续尝试直接访问: {str(e)}")
+        
+        # 第二步：读取具体图层的详细资源
         layer_resource_uri = f"ogc://layer/{layer_name}"
         
         # 通过上下文读取资源

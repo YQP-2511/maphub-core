@@ -122,18 +122,73 @@ async def add_wfs_layer(
 
 
 async def _get_layer_info_simplified(layer_name: str, ctx: Context) -> Dict[str, Any]:
-    """简化的资源访问方法
+    """增强的资源访问方法，包含图层发现功能
     
-    直接使用FastMCP推荐的ctx.read_resource()方法
+    先读取图层列表资源进行发现，再读取详细资源
     """
     try:
-        # 构建资源URI
-        resource_uri = f"ogc://layer/{layer_name}"
+        # 第一步：读取图层列表资源进行发现
+        if ctx:
+            await ctx.debug(f"🔍 开始图层发现: 读取图层列表资源")
+        
+        layers_list_uri = "ogc://layers"
+        layers_list_content = await ctx.read_resource(layers_list_uri)
+        
+        # 处理图层列表内容
+        layers_data = None
+        if isinstance(layers_list_content, list) and len(layers_list_content) > 0:
+            content_item = layers_list_content[0]
+            if hasattr(content_item, 'text'):
+                layers_data = json.loads(content_item.text)
+            elif hasattr(content_item, 'content'):
+                layers_data = json.loads(content_item.content)
+            elif isinstance(content_item, dict):
+                layers_data = content_item
+        elif isinstance(layers_list_content, dict):
+            layers_data = layers_list_content
+        elif isinstance(layers_list_content, str):
+            layers_data = json.loads(layers_list_content)
+        
+        if not layers_data:
+            raise Exception("无法获取图层列表")
+        
+        # 从图层列表中查找目标图层
+        layers = layers_data.get("layers", [])
+        found_layer = None
+        available_layer_names = []
+        
+        for layer in layers:
+            layer_name_in_list = layer.get("layer_name", "")
+            available_layer_names.append(layer_name_in_list)
+            if layer_name_in_list == layer_name:
+                found_layer = layer
+                break
         
         if ctx:
-            await ctx.debug(f"📖 读取资源: {resource_uri}")
+            await ctx.debug(f"📋 图层列表中共找到 {len(layers)} 个图层")
+            await ctx.debug(f"🎯 目标图层 '{layer_name}' {'已找到' if found_layer else '未找到'}")
         
-        # 使用FastMCP标准方法读取资源
+        # 如果在列表中未找到图层，提供建议
+        if not found_layer:
+            # 提供相似的图层名称建议
+            suggestions = []
+            for name in available_layer_names:
+                if layer_name.lower() in name.lower() or name.lower() in layer_name.lower():
+                    suggestions.append(name)
+            
+            if not suggestions:
+                suggestions = available_layer_names[:5]  # 提供前5个作为示例
+            
+            error_msg = f"图层 '{layer_name}' 在图层列表中未找到"
+            if suggestions:
+                error_msg += f"\n💡 建议的图层名称: {', '.join(suggestions)}"
+            raise ValueError(error_msg)
+        
+        # 第二步：读取详细资源
+        if ctx:
+            await ctx.debug(f"📖 图层发现成功，读取详细资源: ogc://layer/{layer_name}")
+        
+        resource_uri = f"ogc://layer/{layer_name}"
         resource_content = await ctx.read_resource(resource_uri)
         
         # 处理资源内容
@@ -167,6 +222,18 @@ async def _get_layer_info_simplified(layer_name: str, ctx: Context) -> Dict[str,
                 error_msg += f"\n💡 建议的图层名称: {', '.join(suggestions[:5])}"
             raise ValueError(error_msg)
         
+        # 第三步：增强图层信息（添加发现阶段的信息）
+        if ctx:
+            await ctx.debug(f"✅ 图层发现和详细信息获取完成")
+        
+        # 将发现阶段的基础信息合并到详细信息中
+        layer_info["discovery_info"] = {
+            "found_in_list": True,
+            "total_layers_available": len(layers),
+            "discovery_timestamp": layers_data.get("timestamp"),
+            "basic_info_from_list": found_layer
+        }
+        
         return layer_info
         
     except json.JSONDecodeError as e:
@@ -189,7 +256,7 @@ async def _build_filter_optimized(
     filter_values: Optional[str],
     ctx: Context
 ) -> Dict[str, Any]:
-    """优化的过滤器构建，支持多值过滤"""
+    """优化的过滤器构建，基于资源中的真实属性"""
     filter_info = {
         "cql_filter": None,
         "description": "无过滤条件",
@@ -227,30 +294,40 @@ async def _build_filter_optimized(
     valid_attributes = list(set([attr for attr in attributes if attr]))
     
     if ctx:
-        await ctx.debug(f"🔍 找到的属性列表: {valid_attributes}")
+        await ctx.debug(f"🔍 从资源获取的属性列表: {valid_attributes}")
     
+    # 如果没有找到属性，返回空过滤器而不是抛出错误
     if not valid_attributes:
-        # 如果没有找到属性，尝试从服务直接获取
         if ctx:
-            await ctx.warning("⚠️ 未找到图层属性信息，尝试直接从WFS服务获取...")
-        
-        raise ValueError(
-            f"无法获取图层 '{layer_info.get('basic_info', {}).get('layer_name', 'unknown')}' 的属性信息。"
-            f"请检查WFS服务是否支持DescribeFeatureType请求。"
-        )
+            await ctx.warning("⚠️ 未从资源中获取到属性信息，跳过过滤")
+        return filter_info
     
+    # 如果属性不在列表中，尝试智能匹配或跳过过滤
     if attribute_filter not in valid_attributes:
-        raise ValueError(
-            f"属性 '{attribute_filter}' 不存在。"
-            f"可用属性: {', '.join(valid_attributes[:10])}"
-            f"{'...' if len(valid_attributes) > 10 else ''}"
-        )
+        # 尝试大小写不敏感匹配
+        matched_attr = None
+        for attr in valid_attributes:
+            if attr.lower() == attribute_filter.lower():
+                matched_attr = attr
+                break
+        
+        if matched_attr:
+            attribute_filter = matched_attr
+            if ctx:
+                await ctx.info(f"🔄 属性名大小写匹配: {attribute_filter}")
+        else:
+            # 如果无法匹配，记录信息但不抛出错误，让AI有机会重新选择
+            if ctx:
+                await ctx.warning(f"⚠️ 属性 '{attribute_filter}' 不在可用属性中: {', '.join(valid_attributes[:5])}")
+            return filter_info
     
     # 解析多个过滤值
     values_list = [value.strip() for value in filter_values.split(',') if value.strip()]
     
     if not values_list:
-        raise ValueError("过滤值不能为空")
+        if ctx:
+            await ctx.warning("⚠️ 过滤值为空，跳过过滤")
+        return filter_info
     
     if ctx:
         await ctx.debug(f"🔍 解析的过滤值列表: {values_list}")
@@ -280,7 +357,7 @@ async def _build_filter_optimized(
     
     if ctx:
         await ctx.info(f"🔍 构建过滤器: {cql_filter}")
-        await ctx.info(f"📊 过滤值数量: {len(values_list)}")
+        await ctx.info(f" 过滤值数量: {len(values_list)}")
     
     return filter_info
 
