@@ -22,50 +22,36 @@ from . import visualization_tools
 
 
 @wfs_layer_server.tool(
-    name="add_wfs_layer",
-    description="""添加WFS矢量图层到地图。智能检测过滤需求并自动应用。
+    name="add_wfs_layer_full",
+    description="""添加完整的WFS矢量图层到地图，获取所有可用数据。
 
-智能过滤策略：
-- 分析用户查询意图，自动识别过滤条件
-- 当查询包含具体限定词时，必须使用过滤参数
-- 支持地名、分类、数值范围等多种过滤方式
+适用场景：
+- 探索性数据分析，需要查看图层的全部内容
+- 小型数据集的完整展示
+- 了解图层的数据结构和属性分布
 
-使用指导：
-1. 有明确条件的查询 → 必须使用attribute_filter和filter_values
-2. 探索性查询 → 可选择性使用过滤
-3. 多条件查询 → 使用逗号分隔多个过滤值""",
-    tags={"wfs", "layer", "vector", "filter", "visualization", "intelligent"}
+注意事项：
+- 会获取图层的所有要素（受max_features限制）
+- 适合数据量较小的图层
+- 如需特定条件的数据，请使用add_wfs_layer_filtered工具""",
+    tags={"wfs", "layer", "vector", "full_data", "exploration"}
 )
-async def add_wfs_layer(
+async def add_wfs_layer_full(
     layer_name: Annotated[str, Field(description="WFS图层名称")],
     layer_title: Annotated[str, Field(description="图层显示标题")] = None,
     max_features: Annotated[int, Field(description="最大要素数量，默认100")] = 100,
-    attribute_filter: Annotated[Optional[str], Field(description="属性名称，用于过滤")] = None,
-    filter_values: Annotated[Optional[str], Field(description="过滤值，多个值用逗号分隔")] = None,
     ctx: Context = None
 ) -> Dict[str, Any]:
-    """添加WFS矢量图层到地图可视化
+    """添加完整的WFS矢量图层到地图可视化
     
-    智能过滤功能：
-    - 自动检测用户查询中的过滤需求
-    - 当用户查询包含具体条件时，自动应用属性过滤
-    - 支持多值过滤和范围查询
-    
-    过滤判断逻辑：
-    1. 如果用户查询包含地名、分类、数值等限定条件，优先使用过滤
-    2. 如果提供了attribute_filter和filter_values参数，直接应用过滤
-    3. 对于探索性查询，可不使用过滤获取全部数据
-    
-    示例场景：
-    - "查看加州的人口数据" → 自动过滤STATE_NAME='California'
-    - "显示住宅用地" → 自动过滤LAND_USE='住宅'
-    - "人口超过100万的城市" → 自动过滤POPULATION>1000000
+    获取图层的所有可用数据，不应用任何过滤条件。
+    适合用于数据探索和完整数据集的展示。
     """
     try:
         if ctx:
-            await ctx.info(f"🔄 开始添加WFS图层: {layer_name}")
+            await ctx.info(f"🔄 开始添加完整WFS图层: {layer_name}")
         
-        # 简化资源访问
+        # 获取图层信息
         layer_info = await _get_layer_info_simplified(layer_name, ctx)
         
         # 验证WFS支持
@@ -76,20 +62,22 @@ async def add_wfs_layer(
                 f"支持的服务类型: {', '.join(supported_services) if supported_services else '无'}"
             )
         
-        # 构建过滤器（支持多值）
-        filter_info = await _build_filter_optimized(layer_info, attribute_filter, filter_values, ctx)
-        
-        # 获取WFS数据（优化版本）
-        geojson_data = await _fetch_wfs_data_optimized(layer_info, max_features, filter_info, ctx)
+        # 获取完整WFS数据（无过滤）
+        geojson_data = await _fetch_wfs_data_optimized(layer_info, max_features, {}, ctx)
         
         # 创建图层对象
-        wfs_layer = _create_wfs_layer_optimized(layer_info, layer_title or layer_name, geojson_data, filter_info)
+        wfs_layer = _create_wfs_layer_optimized(
+            layer_info, 
+            layer_title or layer_name, 
+            geojson_data, 
+            {"description": "完整数据，无过滤条件"}
+        )
         
         # 添加到图层列表
         visualization_tools._current_layers.append(wfs_layer)
         
         feature_count = len(geojson_data.get("features", []))
-        success_msg = f"✅ WFS图层 '{layer_name}' 添加成功，包含 {feature_count} 个要素"
+        success_msg = f"✅ 完整WFS图层 '{layer_name}' 添加成功，包含 {feature_count} 个要素"
         
         if ctx:
             await ctx.info(success_msg)
@@ -100,16 +88,17 @@ async def add_wfs_layer(
             "layer_info": {
                 "name": layer_name,
                 "title": wfs_layer["title"],
-                "type": "wfs",
+                "type": "wfs_full",
                 "feature_count": feature_count,
                 "geometry_type": wfs_layer.get("geometry_type"),
-                "filter_applied": bool(filter_info.get("cql_filter"))
+                "filter_applied": False,
+                "data_type": "complete"
             },
             "current_layer_count": len(visualization_tools._current_layers)
         }
         
     except Exception as e:
-        error_msg = f"❌ 添加WFS图层失败: {str(e)}"
+        error_msg = f"❌ 添加完整WFS图层失败: {str(e)}"
         logger.error(error_msg, exc_info=True)
         if ctx:
             await ctx.error(error_msg)
@@ -117,6 +106,236 @@ async def add_wfs_layer(
             "success": False,
             "error": error_msg,
             "layer_name": layer_name,
+            "current_layer_count": len(visualization_tools._current_layers)
+        }
+
+
+@wfs_layer_server.tool(
+    name="add_wfs_layer_filtered",
+    description="""添加过滤的WFS矢量图层到地图，仅获取符合特定条件的数据。
+
+智能过滤策略：
+- 必须提供attribute_filter和filter_values参数
+- 支持单值和多值过滤（多个值用逗号分隔）
+- 自动匹配图层的真实属性名称
+- 支持地名、分类、数值范围等多种过滤方式
+
+适用场景：
+- 查找特定区域的数据（如"北京市"、"加州"）
+- 筛选特定类别的要素（如"住宅用地"、"商业区"）
+- 获取满足数值条件的数据（需要在filter_values中指定条件）
+
+使用示例：
+- 过滤特定城市：attribute_filter="CITY_NAME", filter_values="北京"
+- 多个城市：attribute_filter="CITY_NAME", filter_values="北京,上海,广州"
+- 特定类型：attribute_filter="LAND_USE", filter_values="住宅"
+""",
+    tags={"wfs", "layer", "vector", "filter", "targeted", "conditional"}
+)
+async def add_wfs_layer_filtered(
+    layer_name: Annotated[str, Field(description="WFS图层名称")],
+    attribute_filter: Annotated[str, Field(description="用于过滤的属性名称（必需）")],
+    filter_values: Annotated[str, Field(description="过滤值，多个值用逗号分隔（必需）")],
+    layer_title: Annotated[str, Field(description="图层显示标题")] = None,
+    max_features: Annotated[int, Field(description="最大要素数量，默认100")] = 100,
+    ctx: Context = None
+) -> Dict[str, Any]:
+    """添加过滤的WFS矢量图层到地图可视化
+    
+    专门用于获取符合特定条件的数据。
+    必须提供过滤属性和过滤值，确保获取精确的目标数据。
+    """
+    try:
+        if ctx:
+            await ctx.info(f"🔄 开始添加过滤WFS图层: {layer_name}")
+            await ctx.info(f"🔍 过滤条件: {attribute_filter} = {filter_values}")
+        
+        # 验证必需参数
+        if not attribute_filter or not filter_values:
+            raise ValueError("过滤工具必须提供attribute_filter和filter_values参数")
+        
+        # 获取图层信息
+        layer_info = await _get_layer_info_simplified(layer_name, ctx)
+        
+        # 验证WFS支持
+        if not _validate_wfs_support(layer_info, layer_name):
+            supported_services = layer_info.get("metadata", {}).get("supported_services", [])
+            raise ValueError(
+                f"图层 '{layer_name}' 不支持WFS服务。"
+                f"支持的服务类型: {', '.join(supported_services) if supported_services else '无'}"
+            )
+        
+        # 构建过滤器
+        filter_info = await _build_filter_optimized(layer_info, attribute_filter, filter_values, ctx)
+        
+        # 检查过滤器是否成功构建
+        if not filter_info.get("cql_filter"):
+            raise ValueError(f"无法为属性 '{attribute_filter}' 构建有效的过滤器。请检查属性名称是否正确。")
+        
+        # 获取过滤的WFS数据
+        geojson_data = await _fetch_wfs_data_optimized(layer_info, max_features, filter_info, ctx)
+        
+        # 创建图层对象
+        wfs_layer = _create_wfs_layer_optimized(layer_info, layer_title or layer_name, geojson_data, filter_info)
+        
+        # 添加到图层列表
+        visualization_tools._current_layers.append(wfs_layer)
+        
+        feature_count = len(geojson_data.get("features", []))
+        success_msg = f"✅ 过滤WFS图层 '{layer_name}' 添加成功，包含 {feature_count} 个要素"
+        
+        if ctx:
+            await ctx.info(success_msg)
+            await ctx.info(f"🔍 应用的过滤条件: {filter_info.get('description', '未知')}")
+        
+        return {
+            "success": True,
+            "message": success_msg,
+            "layer_info": {
+                "name": layer_name,
+                "title": wfs_layer["title"],
+                "type": "wfs_filtered",
+                "feature_count": feature_count,
+                "geometry_type": wfs_layer.get("geometry_type"),
+                "filter_applied": True,
+                "filter_description": filter_info.get("description"),
+                "filter_attribute": attribute_filter,
+                "filter_values": filter_values.split(','),
+                "data_type": "filtered"
+            },
+            "current_layer_count": len(visualization_tools._current_layers)
+        }
+        
+    except Exception as e:
+        error_msg = f"❌ 添加过滤WFS图层失败: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        if ctx:
+            await ctx.error(error_msg)
+        return {
+            "success": False,
+            "error": error_msg,
+            "layer_name": layer_name,
+            "filter_info": {
+                "attribute": attribute_filter,
+                "values": filter_values
+            },
+            "current_layer_count": len(visualization_tools._current_layers)
+        }
+
+
+@wfs_layer_server.tool(
+    name="add_wfs_layer_filtered",
+    description="""添加过滤的WFS矢量图层到地图，基于图层资源中的真实属性进行精确过滤。
+
+属性匹配机制：
+- 自动从layer_registry.py资源中获取图层的真实属性信息
+- 支持精确匹配、大小写不敏感匹配和包含匹配
+- 优先使用WFS的feature_schema中的详细属性信息
+- 如果资源中没有属性信息，会尝试直接使用用户提供的属性名
+
+过滤策略：
+- 单值过滤：attribute_filter="CITY_NAME", filter_values="北京"
+- 多值过滤：attribute_filter="CITY_NAME", filter_values="北京,上海,广州"
+- 支持地名、分类、数值等各种类型的属性过滤
+
+适用场景：
+- 查找特定区域的数据（基于行政区划、地名等属性）
+- 筛选特定类别的要素（基于土地利用、建筑类型等属性）
+- 获取满足特定条件的数据子集
+
+注意：工具会智能匹配属性名，但建议使用准确的属性名以获得最佳结果。
+""",
+    tags={"wfs", "layer", "vector", "filter", "resource-based", "smart-matching"}
+)
+async def add_wfs_layer_filtered(
+    layer_name: Annotated[str, Field(description="WFS图层名称")],
+    attribute_filter: Annotated[str, Field(description="用于过滤的属性名称，将与资源中的真实属性智能匹配")],
+    filter_values: Annotated[str, Field(description="过滤值，多个值用逗号分隔")],
+    layer_title: Annotated[str, Field(description="图层显示标题")] = None,
+    max_features: Annotated[int, Field(description="最大要素数量，默认100")] = 100,
+    ctx: Context = None
+) -> Dict[str, Any]:
+    """添加过滤的WFS矢量图层，基于资源中的真实属性进行智能过滤"""
+    try:
+        if ctx:
+            await ctx.info(f"🔄 开始添加过滤WFS图层: {layer_name}")
+            await ctx.info(f"🔍 过滤条件: {attribute_filter} = {filter_values}")
+        
+        # 验证必需参数
+        if not attribute_filter or not filter_values:
+            raise ValueError("过滤工具必须提供attribute_filter和filter_values参数")
+        
+        # 获取图层信息（从layer_registry.py资源）
+        layer_info = await _get_layer_info_simplified(layer_name, ctx)
+        
+        # 验证WFS支持
+        if not _validate_wfs_support(layer_info, layer_name):
+            supported_services = layer_info.get("metadata", {}).get("supported_services", [])
+            raise ValueError(
+                f"图层 '{layer_name}' 不支持WFS服务。"
+                f"支持的服务类型: {', '.join(supported_services) if supported_services else '无'}"
+            )
+        
+        # 基于资源中的真实属性构建过滤器
+        filter_info = await _build_filter_optimized(layer_info, attribute_filter, filter_values, ctx)
+        
+        # 检查过滤器是否成功构建
+        if not filter_info.get("cql_filter"):
+            # 提供可用属性信息帮助用户
+            available_attrs = _extract_attributes_from_resource(layer_info)
+            attr_info = f"可用属性: {', '.join(available_attrs[:10])}" if available_attrs else "无法获取属性信息"
+            raise ValueError(f"无法为属性 '{attribute_filter}' 构建有效的过滤器。{attr_info}")
+        
+        # 获取过滤的WFS数据
+        geojson_data = await _fetch_wfs_data_optimized(layer_info, max_features, filter_info, ctx)
+        
+        # 创建图层对象
+        wfs_layer = _create_wfs_layer_optimized(layer_info, layer_title or layer_name, geojson_data, filter_info)
+        
+        # 添加到图层列表
+        visualization_tools._current_layers.append(wfs_layer)
+        
+        feature_count = len(geojson_data.get("features", []))
+        success_msg = f"✅ 过滤WFS图层 '{layer_name}' 添加成功，包含 {feature_count} 个要素"
+        
+        if ctx:
+            await ctx.info(success_msg)
+            await ctx.info(f"🔍 应用的过滤条件: {filter_info.get('description', '未知')}")
+            if filter_info.get("matched_from_resource"):
+                await ctx.info("✅ 属性名已从资源中成功匹配")
+        
+        return {
+            "success": True,
+            "message": success_msg,
+            "layer_info": {
+                "name": layer_name,
+                "title": wfs_layer["title"],
+                "type": "wfs_filtered",
+                "feature_count": feature_count,
+                "geometry_type": wfs_layer.get("geometry_type"),
+                "filter_applied": True,
+                "filter_description": filter_info.get("description"),
+                "filter_attribute": filter_info.get("attribute_name"),
+                "filter_values": filter_info.get("attribute_values", []),
+                "attribute_matched_from_resource": filter_info.get("matched_from_resource", False),
+                "data_type": "filtered"
+            },
+            "current_layer_count": len(visualization_tools._current_layers)
+        }
+        
+    except Exception as e:
+        error_msg = f"❌ 添加过滤WFS图层失败: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        if ctx:
+            await ctx.error(error_msg)
+        return {
+            "success": False,
+            "error": error_msg,
+            "layer_name": layer_name,
+            "filter_info": {
+                "attribute": attribute_filter,
+                "values": filter_values
+            },
             "current_layer_count": len(visualization_tools._current_layers)
         }
 
@@ -256,7 +475,7 @@ async def _build_filter_optimized(
     filter_values: Optional[str],
     ctx: Context
 ) -> Dict[str, Any]:
-    """优化的过滤器构建，基于资源中的真实属性"""
+    """优化的过滤器构建，直接使用资源中的真实属性信息"""
     filter_info = {
         "cql_filter": None,
         "description": "无过滤条件",
@@ -268,98 +487,141 @@ async def _build_filter_optimized(
     if not attribute_filter or not filter_values:
         return filter_info
     
-    # 从多个来源获取属性列表
-    attributes = []
-    
-    # 1. 从capabilities获取属性
-    capabilities_attrs = layer_info.get("capabilities", {}).get("attributes", [])
-    if capabilities_attrs:
-        attributes.extend([attr.get("name", "") for attr in capabilities_attrs if attr.get("name")])
-    
-    # 2. 从detailed_capabilities的WFS部分获取属性
-    wfs_details = layer_info.get("detailed_capabilities", {}).get("wfs", {})
-    if wfs_details:
-        wfs_attrs = wfs_details.get("attributes", [])
-        if wfs_attrs:
-            attributes.extend([attr.get("name", "") for attr in wfs_attrs if attr.get("name")])
-        
-        # 3. 从feature_schema获取属性（DescribeFeatureType结果）
-        feature_schema = wfs_details.get("feature_schema", {})
-        if feature_schema:
-            schema_attrs = feature_schema.get("attributes", [])
-            if schema_attrs:
-                attributes.extend([attr.get("name", "") for attr in schema_attrs if attr.get("name")])
-    
-    # 去重并过滤空值
-    valid_attributes = list(set([attr for attr in attributes if attr]))
+    # 从layer_registry.py资源中提取真实属性信息
+    available_attributes = _extract_attributes_from_resource(layer_info)
     
     if ctx:
-        await ctx.debug(f"🔍 从资源获取的属性列表: {valid_attributes}")
+        await ctx.debug(f"🔍 从资源获取的属性列表: {available_attributes}")
     
-    # 如果没有找到属性，返回空过滤器而不是抛出错误
-    if not valid_attributes:
+    # 如果没有找到属性，记录警告但不阻止流程
+    if not available_attributes:
         if ctx:
-            await ctx.warning("⚠️ 未从资源中获取到属性信息，跳过过滤")
-        return filter_info
-    
-    # 如果属性不在列表中，尝试智能匹配或跳过过滤
-    if attribute_filter not in valid_attributes:
-        # 尝试大小写不敏感匹配
-        matched_attr = None
-        for attr in valid_attributes:
-            if attr.lower() == attribute_filter.lower():
-                matched_attr = attr
-                break
-        
-        if matched_attr:
-            attribute_filter = matched_attr
+            await ctx.warning("⚠️ 未从资源中获取到属性信息，将尝试直接使用用户提供的属性名")
+        # 直接使用用户提供的属性名，让WFS服务验证
+        matched_attribute = attribute_filter
+    else:
+        # 智能匹配属性名
+        matched_attribute = _smart_match_attribute(attribute_filter, available_attributes, ctx)
+        if not matched_attribute:
             if ctx:
-                await ctx.info(f"🔄 属性名大小写匹配: {attribute_filter}")
-        else:
-            # 如果无法匹配，记录信息但不抛出错误，让AI有机会重新选择
-            if ctx:
-                await ctx.warning(f"⚠️ 属性 '{attribute_filter}' 不在可用属性中: {', '.join(valid_attributes[:5])}")
+                await ctx.warning(f"⚠️ 属性 '{attribute_filter}' 无法匹配，可用属性: {', '.join(available_attributes[:5])}")
             return filter_info
     
-    # 解析多个过滤值
-    values_list = [value.strip() for value in filter_values.split(',') if value.strip()]
-    
-    if not values_list:
-        if ctx:
-            await ctx.warning("⚠️ 过滤值为空，跳过过滤")
-        return filter_info
-    
-    if ctx:
-        await ctx.debug(f"🔍 解析的过滤值列表: {values_list}")
-    
     # 构建CQL过滤器
-    if len(values_list) == 1:
-        # 单个值：使用等值过滤
-        escaped_value = values_list[0].replace("'", "''")  # 转义单引号
-        cql_filter = f"{attribute_filter} = '{escaped_value}'"
-        filter_type = "single_value"
-        description = f"过滤条件: {attribute_filter} = '{values_list[0]}'"
-    else:
-        # 多个值：使用IN操作符
-        escaped_values = [f"'{value.replace(chr(39), chr(39)+chr(39))}'" for value in values_list]
-        cql_filter = f"{attribute_filter} IN ({', '.join(escaped_values)})"
-        filter_type = "multiple_values"
-        description = f"过滤条件: {attribute_filter} IN ({', '.join(values_list)})"
+    cql_filter, filter_description = _build_cql_filter(matched_attribute, filter_values)
     
     filter_info.update({
         "cql_filter": cql_filter,
-        "description": description,
-        "attribute_name": attribute_filter,
-        "attribute_values": values_list,
-        "filter_type": filter_type,
-        "value_count": len(values_list)
+        "description": filter_description,
+        "attribute_name": matched_attribute,
+        "attribute_values": [v.strip() for v in filter_values.split(',') if v.strip()],
+        "filter_type": "single_value" if ',' not in filter_values else "multiple_values",
+        "value_count": len([v.strip() for v in filter_values.split(',') if v.strip()]),
+        "matched_from_resource": matched_attribute in available_attributes if available_attributes else False
     })
     
     if ctx:
         await ctx.info(f"🔍 构建过滤器: {cql_filter}")
-        await ctx.info(f" 过滤值数量: {len(values_list)}")
+        await ctx.info(f"📊 过滤值数量: {filter_info['value_count']}")
     
     return filter_info
+
+
+def _extract_attributes_from_resource(layer_info: Dict[str, Any]) -> List[str]:
+    """从layer_registry.py资源中提取属性信息
+    
+    按优先级从多个位置提取属性：
+    1. detailed_capabilities.wfs.feature_schema.attributes (最详细)
+    2. detailed_capabilities.wfs.attributes (WFS特定)
+    3. capabilities.attributes (通用)
+    """
+    attributes = []
+    
+    # 优先级1: 从WFS的feature_schema获取（DescribeFeatureType结果）
+    wfs_details = layer_info.get("detailed_capabilities", {}).get("wfs", {})
+    if wfs_details:
+        feature_schema = wfs_details.get("feature_schema", {})
+        if feature_schema:
+            schema_attrs = feature_schema.get("attributes", [])
+            for attr in schema_attrs:
+                if isinstance(attr, dict) and attr.get("name"):
+                    attributes.append(attr["name"])
+        
+        # 优先级2: 从WFS详细信息获取
+        if not attributes:
+            wfs_attrs = wfs_details.get("attributes", [])
+            for attr in wfs_attrs:
+                if isinstance(attr, dict) and attr.get("name"):
+                    attributes.append(attr["name"])
+    
+    # 优先级3: 从通用capabilities获取
+    if not attributes:
+        capabilities_attrs = layer_info.get("capabilities", {}).get("attributes", [])
+        for attr in capabilities_attrs:
+            if isinstance(attr, dict) and attr.get("name"):
+                attributes.append(attr["name"])
+    
+    # 去重并过滤空值
+    return list(set([attr for attr in attributes if attr]))
+
+
+def _smart_match_attribute(target_attr: str, available_attrs: List[str], ctx: Context = None) -> Optional[str]:
+    """智能匹配属性名称
+    
+    匹配策略：
+    1. 精确匹配
+    2. 大小写不敏感匹配
+    3. 包含匹配（目标属性包含在可用属性中）
+    4. 被包含匹配（可用属性包含在目标属性中）
+    """
+    if not available_attrs:
+        return target_attr
+    
+    # 1. 精确匹配
+    if target_attr in available_attrs:
+        return target_attr
+    
+    # 2. 大小写不敏感匹配
+    for attr in available_attrs:
+        if attr.lower() == target_attr.lower():
+            if ctx:
+                ctx.info(f"🔄 属性名大小写匹配: {target_attr} -> {attr}")
+            return attr
+    
+    # 3. 包含匹配（目标属性包含在可用属性中）
+    for attr in available_attrs:
+        if target_attr.lower() in attr.lower():
+            if ctx:
+                ctx.info(f"🔄 属性名包含匹配: {target_attr} -> {attr}")
+            return attr
+    
+    # 4. 被包含匹配（可用属性包含在目标属性中）
+    for attr in available_attrs:
+        if attr.lower() in target_attr.lower():
+            if ctx:
+                ctx.info(f"🔄 属性名被包含匹配: {target_attr} -> {attr}")
+            return attr
+    
+    # 无法匹配
+    return None
+
+
+def _build_cql_filter(attribute_name: str, filter_values: str) -> tuple[str, str]:
+    """构建CQL过滤器字符串"""
+    values_list = [value.strip() for value in filter_values.split(',') if value.strip()]
+    
+    if len(values_list) == 1:
+        # 单个值：使用等值过滤
+        escaped_value = values_list[0].replace("'", "''")  # 转义单引号
+        cql_filter = f"{attribute_name} = '{escaped_value}'"
+        description = f"过滤条件: {attribute_name} = '{values_list[0]}'"
+    else:
+        # 多个值：使用IN操作符
+        escaped_values = [f"'{value.replace(chr(39), chr(39)+chr(39))}'" for value in values_list]
+        cql_filter = f"{attribute_name} IN ({', '.join(escaped_values)})"
+        description = f"过滤条件: {attribute_name} IN ({', '.join(values_list)})"
+    
+    return cql_filter, description
 
 
 async def _fetch_wfs_data_optimized(
