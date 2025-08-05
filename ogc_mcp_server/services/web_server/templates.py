@@ -428,27 +428,16 @@ class WebTemplates:
     
     def generate_composite_map(self, title: str, layers: List[Dict[str, Any]], 
                               map_config: Dict[str, Any]) -> str:
-        """生成复合地图HTML
-        
-        Args:
-            title: 地图标题
-            layers: 图层列表
-            map_config: 地图配置
-            
-        Returns:
-            HTML内容
-        """
+        """生成复合地图HTML - 全屏优化版本，调整布局：图层面板左侧，操作框右侧，无顶部标题"""
         # 获取地图参数
-        width = map_config.get('width', 1200)
-        height = map_config.get('height', 800)
         zoom = map_config.get('zoom', 10)
         center = map_config.get('center', [39.9042, 116.4074])
         
         # 生成图层JavaScript代码
         layers_js = self._generate_layers_javascript(layers)
         
-        # 生成图层信息HTML
-        layers_info_html = self._generate_layers_info_html(layers)
+        # 生成左侧图层信息HTML
+        layers_info_html = self._generate_layers_info_html_left(layers)
         
         # 优化图层类型显示
         layer_types = []
@@ -463,40 +452,43 @@ class WebTemplates:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{title}</title>
+    <title>{title} - 全屏地理可视化</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
-        {self._get_composite_map_styles(width, height)}
+        {self._get_composite_map_styles_modified(1920, 1080)}
     </style>
 </head>
 <body>
     <div class="map-container">
-        <div class="map-header">
-            <div class="map-title">🗺️ {title}</div>
-            <div class="map-info">
-                <div class="info-item"><strong>图层数量:</strong> {len(layers)}</div>
-                <div class="info-item"><strong>图层类型:</strong> {', '.join(set(layer_types))}</div>
-                <div class="info-item"><strong>坐标系:</strong> EPSG:4326</div>
-                <div class="info-item"><strong>服务类型:</strong> 复合可视化</div>
+        {layers_info_html}
+        
+        <!-- 右侧工具栏 -->
+        <div class="toolbar-right">
+            <div class="tool-button" onclick="toggleFullscreen()" title="全屏切换">
+                🔳
+            </div>
+            <div class="tool-button" onclick="fitToLayers()" title="缩放到图层">
+                🎯
+            </div>
+            <div class="tool-button" onclick="toggleMeasure()" title="测量工具">
+                📏
             </div>
         </div>
-        
-        {layers_info_html}
         
         <div id="map"></div>
         
         <div class="controls">
             <div class="control-group">
                 <span class="control-label">🎯 中心点:</span>
-                <span id="center-coords">{center[0]:.4f}, {center[1]:.4f}</span>
+                <span class="control-value" id="center-coords">{center[0]:.4f}, {center[1]:.4f}</span>
             </div>
             <div class="control-group">
                 <span class="control-label">🔍 缩放级别:</span>
-                <span id="zoom-level">{zoom}</span>
+                <span class="control-value" id="zoom-level">{zoom}</span>
             </div>
             <div class="control-group">
                 <span class="control-label">📍 鼠标位置:</span>
-                <span id="mouse-coords">移动鼠标查看坐标</span>
+                <span class="control-value" id="mouse-coords">移动鼠标查看坐标</span>
             </div>
         </div>
     </div>
@@ -504,7 +496,7 @@ class WebTemplates:
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="https://cdn.jsdelivr.net/gh/alexandre-melard/leaflet.TileLayer.WMTS@master/leaflet-tilelayer-wmts.js"></script>
     <script>
-        {self._get_composite_map_javascript(center, zoom, layers_js)}
+        {self._get_enhanced_map_javascript(center, zoom, layers_js)}
     </script>
 </body>
 </html>"""
@@ -863,249 +855,1038 @@ class WebTemplates:
         return '\n'.join(layers_js)
     
     def _generate_layers_info_html(self, layers: List[Dict[str, Any]]) -> str:
-        """生成图层信息HTML"""
-        layers_info = '<div class="layer-info"><div class="layer-count">包含图层:</div>'
-        for layer in layers:
+        """生成图层信息HTML - 移除服务地址显示和工具栏"""
+        layers_html = '''
+        <div class="layers-panel" id="layersPanel">
+            <div class="panel-header" onclick="toggleLayersPanel()">
+                <div class="panel-title">🗂️ 图层信息</div>
+                <div class="panel-toggle">▼</div>
+            </div>
+            <div class="panel-content">
+        '''
+        
+        for i, layer in enumerate(layers):
             layer_type = 'WFS' if layer['type'] == 'geojson' else layer['type'].upper()
             layer_source = layer.get('layer_info', {}).get('service_name', '未知来源')
-            layers_info += f'<div>• {layer["name"]} ({layer_type} - {layer_source})</div>'
-        layers_info += '</div>'
-        return layers_info
+            layer_title = layer.get('layer_info', {}).get('layer_title', layer['name'])
+            
+            # 生成图层缩略图
+            thumbnail_text = self._get_layer_thumbnail(layer['type'])
+            thumbnail_color = self._get_layer_color(layer['type'])
+            
+            # 获取图层详细信息（不包含服务地址）
+            layer_details = self._get_layer_details_without_url(layer)
+            
+            layers_html += f'''
+            <div class="layer-card" data-layer-index="{i}">
+                <div class="layer-header">
+                    <div class="layer-thumbnail" style="background: {thumbnail_color};">
+                        {thumbnail_text}
+                    </div>
+                    <div class="layer-info">
+                        <div class="layer-name" title="{layer['name']}">{layer['name']}</div>
+                        <div class="layer-type">{layer_type}</div>
+                    </div>
+                </div>
+                <div class="layer-details">
+                    <div><strong>标题:</strong> {layer_title}</div>
+                    <div><strong>来源:</strong> {layer_source}</div>
+                    {layer_details}
+                </div>
+            </div>
+            '''
+        
+        layers_html += '''
+            </div>
+        </div>
+        '''
+        
+        return layers_html
+    
+    def _get_layer_thumbnail(self, layer_type: str) -> str:
+        """获取图层缩略图文本"""
+        thumbnails = {
+            'wms': 'WMS',
+            'wmts': 'WMTS', 
+            'geojson': 'WFS',
+            'wfs': 'WFS'
+        }
+        return thumbnails.get(layer_type.lower(), 'UNK')
+    
+    def _get_layer_color(self, layer_type: str) -> str:
+        """获取图层颜色"""
+        colors = {
+            'wms': 'linear-gradient(135deg, #e74c3c, #c0392b)',
+            'wmts': 'linear-gradient(135deg, #9b59b6, #8e44ad)',
+            'geojson': 'linear-gradient(135deg, #2ecc71, #27ae60)',
+            'wfs': 'linear-gradient(135deg, #2ecc71, #27ae60)'
+        }
+        return colors.get(layer_type.lower(), 'linear-gradient(135deg, #95a5a6, #7f8c8d)')
+    
+    def _get_layer_details(self, layer: Dict[str, Any]) -> str:
+        """获取图层详细信息"""
+        details = []
+        
+        if layer['type'] == 'geojson':
+            feature_count = len(layer.get('geojson_data', {}).get('features', []))
+            details.append(f"<div><strong>要素数量:</strong> {feature_count}</div>")
+            
+            # 几何类型统计
+            geom_types = {}
+            for feature in layer.get('geojson_data', {}).get('features', []):
+                geom_type = feature.get('geometry', {}).get('type', 'Unknown')
+                geom_types[geom_type] = geom_types.get(geom_type, 0) + 1
+            
+            if geom_types:
+                geom_summary = ', '.join([f"{count}个{gtype}" for gtype, count in geom_types.items()])
+                details.append(f"<div><strong>几何类型:</strong> {geom_summary}</div>")
+        
+        elif layer['type'] in ['wms', 'wmts']:
+            layer_info = layer.get('layer_info', {})
+            if 'bbox' in layer_info:
+                bbox = layer_info['bbox']
+                details.append(f"<div><strong>边界框:</strong> {bbox[:2]} 到 {bbox[2:]}</div>")
+            
+            if 'styles' in layer and layer['styles']:
+                styles_text = ', '.join(layer['styles'][:2])  # 只显示前2个样式
+                if len(layer['styles']) > 2:
+                    styles_text += f" (+{len(layer['styles'])-2}个)"
+                details.append(f"<div><strong>样式:</strong> {styles_text}</div>")
+        
+        opacity = layer.get('opacity', 0.8)
+        details.append(f"<div><strong>透明度:</strong> {int(opacity * 100)}%</div>")
+        
+        return layers_html
+    
+    def _get_layer_details_without_url(self, layer: Dict[str, Any]) -> str:
+        """获取图层详细信息 - 不包含服务地址"""
+        details = []
+        
+        if layer['type'] == 'geojson':
+            feature_count = len(layer.get('geojson_data', {}).get('features', []))
+            details.append(f"<div><strong>要素数量:</strong> {feature_count}</div>")
+            
+            # 几何类型统计
+            geom_types = {}
+            for feature in layer.get('geojson_data', {}).get('features', []):
+                geom_type = feature.get('geometry', {}).get('type', 'Unknown')
+                geom_types[geom_type] = geom_types.get(geom_type, 0) + 1
+            
+            if geom_types:
+                geom_summary = ', '.join([f"{count}个{gtype}" for gtype, count in geom_types.items()])
+                details.append(f"<div><strong>几何类型:</strong> {geom_summary}</div>")
+        
+        elif layer['type'] in ['wms', 'wmts']:
+            layer_info = layer.get('layer_info', {})
+            if 'bbox' in layer_info:
+                bbox = layer_info['bbox']
+                details.append(f"<div><strong>边界框:</strong> {bbox[:2]} 到 {bbox[2:]}</div>")
+            
+            if 'styles' in layer and layer['styles']:
+                styles_text = ', '.join(layer['styles'][:2])  # 只显示前2个样式
+                if len(layer['styles']) > 2:
+                    styles_text += f" (+{len(layer['styles'])-2}个)"
+                details.append(f"<div><strong>样式:</strong> {styles_text}</div>")
+        
+        opacity = layer.get('opacity', 0.8)
+        details.append(f"<div><strong>透明度:</strong> {int(opacity * 100)}%</div>")
+        
+        return '\n'.join(details)
+    
+    def _generate_layers_info_html_left(self, layers: List[Dict[str, Any]]) -> str:
+        """生成左侧图层信息HTML - 按钮始终吸附在面板右上角外部"""
+        layers_html = '''
+        <!-- 弹簧式图层信息面板 - 默认完全隐藏 -->
+        <div class="layers-panel-left collapsed" id="layersPanel">
+            <div class="panel-header">
+                <div class="panel-title">🗂️ 图层信息</div>
+            </div>
+            <div class="panel-content">
+        '''
+        
+        for i, layer in enumerate(layers):
+            layer_type = 'WFS' if layer['type'] == 'geojson' else layer['type'].upper()
+            layer_source = layer.get('layer_info', {}).get('service_name', '未知来源')
+            layer_title = layer.get('layer_info', {}).get('layer_title', layer['name'])
+            
+            # 生成图层缩略图
+            thumbnail_text = self._get_layer_thumbnail(layer['type'])
+            thumbnail_color = self._get_layer_color(layer['type'])
+            
+            # 获取图层详细信息（不包含服务地址）
+            layer_details = self._get_layer_details_without_url(layer)
+            
+            layers_html += f'''
+            <div class="layer-card" data-layer-index="{i}">
+                <div class="layer-header">
+                    <div class="layer-thumbnail" style="background: {thumbnail_color};">
+                        {thumbnail_text}
+                    </div>
+                    <div class="layer-info">
+                        <div class="layer-name" title="{layer['name']}">{layer['name']}</div>
+                        <div class="layer-type">{layer_type}</div>
+                    </div>
+                </div>
+                <div class="layer-details">
+                    <div><strong>标题:</strong> {layer_title}</div>
+                    <div><strong>来源:</strong> {layer_source}</div>
+                    {layer_details}
+                </div>
+            </div>
+            '''
+        
+        layers_html += '''
+            </div>
+        </div>
+        
+        <!-- 弹簧式控制按钮 - 独立定位，始终吸附在面板右上角外部 -->
+        <div class="spring-toggle-button" id="springToggleBtn" onclick="toggleLayersPanel()">
+            <span class="spring-icon">▶</span>
+        </div>
+        '''
+        
+        return layers_html
     
     def _get_composite_map_styles(self, width: int, height: int) -> str:
-        """获取复合地图样式"""
+        """获取复合地图样式 - 修复图层控制器遮挡问题"""
         return f"""
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+        
         body {{ 
             margin: 0; 
-            padding: 20px; 
-            font-family: Arial, sans-serif; 
-            background-color: #f5f5f5; 
+            padding: 0; 
+            font-family: 'Microsoft YaHei', Arial, sans-serif; 
+            background-color: #f5f5f5;
+            overflow: hidden;
+            height: 100vh;
         }}
+        
         .map-container {{ 
-            background: white; 
-            border-radius: 8px; 
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1); 
-            padding: 20px; 
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            background: #fff;
         }}
+        
+        /* 全屏地图 */
+        #map {{ 
+            width: 100vw !important; 
+            height: 100vh !important; 
+            border: none;
+            z-index: 1;
+        }}
+        
+        /* 顶部标题栏 */
         .map-header {{
-            margin-bottom: 15px;
-            padding-bottom: 15px;
-            border-bottom: 1px solid #eee;
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: linear-gradient(135deg, rgba(255,255,255,0.95) 0%, rgba(240,240,240,0.95) 100%);
+            backdrop-filter: blur(10px);
+            border-bottom: 1px solid rgba(0,0,0,0.1);
+            padding: 15px 20px;
+            z-index: 1000;
+            transition: transform 0.3s ease;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         }}
+        
+        .map-header.hidden {{
+            transform: translateY(-100%);
+        }}
+        
         .map-title {{
-            font-size: 24px;
-            font-weight: bold;
-            color: #333;
-            margin: 0 0 10px 0;
+            font-size: 20px;
+            font-weight: 600;
+            color: #2c3e50;
+            margin: 0 0 8px 0;
+            text-shadow: 0 1px 2px rgba(255,255,255,0.8);
         }}
+        
         .map-info {{
             display: flex;
-            gap: 20px;
+            gap: 15px;
             flex-wrap: wrap;
-            color: #666;
+            color: #555;
+            font-size: 13px;
+        }}
+        
+        .info-item {{
+            background: rgba(255,255,255,0.8);
+            padding: 4px 10px;
+            border-radius: 15px;
+            border: 1px solid rgba(0,0,0,0.1);
+            backdrop-filter: blur(5px);
+        }}
+        
+        /* 可收缩图层面板 - 调整位置避免遮挡Leaflet控件 */
+        .layers-panel {{
+            position: absolute;
+            top: 100px;
+            right: 20px;
+            width: 320px;
+            max-height: calc(100vh - 200px);
+            background: rgba(255,255,255,0.95);
+            backdrop-filter: blur(15px);
+            border: 1px solid rgba(0,0,0,0.2);
+            border-radius: 12px;
+            z-index: 500;  /* 降低z-index，避免遮挡Leaflet控件 */
+            transition: all 0.3s ease;
+            overflow: hidden;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+        }}
+        
+        .layers-panel.collapsed {{
+            width: 60px;
+            height: 60px;
+        }}
+        
+        .layers-panel.collapsed .panel-content {{
+            display: none;
+        }}
+        
+        .panel-header {{
+            background: linear-gradient(135deg, #3498db 0%, #2980b9 100%);
+            color: #fff;
+            padding: 12px 15px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid rgba(255,255,255,0.2);
+            user-select: none;
+        }}
+        
+        .panel-title {{
+            font-weight: 600;
             font-size: 14px;
         }}
-        .info-item {{
-            background: #f8f9fa;
-            padding: 5px 10px;
-            border-radius: 4px;
+        
+        .panel-toggle {{
+            font-size: 16px;
+            transition: transform 0.3s ease;
         }}
-        .layer-info {{
-            background: #e8f4fd;
-            border: 1px solid #bee5eb;
-            border-radius: 4px;
-            padding: 10px;
-            margin-bottom: 10px;
+        
+        .layers-panel.collapsed .panel-toggle {{
+            transform: rotate(180deg);
         }}
-        .layer-count {{
-            font-weight: bold;
-            color: #0c5460;
-            margin-bottom: 5px;
+        
+        .panel-content {{
+            max-height: calc(100vh - 300px);
+            overflow-y: auto;
+            padding: 0;
         }}
-        #map {{ 
-            width: {width}px; 
-            height: {height}px; 
-            border-radius: 4px; 
-            border: 1px solid #ddd; 
-        }}
-        .controls {{
-            margin-top: 15px;
+        
+        /* 图层卡片 */
+        .layer-card {{
+            background: rgba(0,0,0,0.02);
+            border-bottom: 1px solid rgba(0,0,0,0.1);
             padding: 15px;
-            background: #f8f9fa;
-            border-radius: 4px;
+            transition: all 0.3s ease;
         }}
-        .control-group {{
+        
+        .layer-card:hover {{
+            background: rgba(0,0,0,0.05);
+        }}
+        
+        .layer-card:last-child {{
+            border-bottom: none;
+        }}
+        
+        .layer-header {{
+            display: flex;
+            align-items: center;
             margin-bottom: 10px;
         }}
-        .control-label {{
+        
+        .layer-thumbnail {{
+            width: 40px;
+            height: 40px;
+            border-radius: 6px;
+            margin-right: 12px;
+            background: linear-gradient(135deg, #3498db, #2980b9);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #fff;
             font-weight: bold;
+            font-size: 12px;
+            flex-shrink: 0;
+            border: 2px solid rgba(255,255,255,0.3);
+        }}
+        
+        .layer-info {{
+            flex: 1;
+            min-width: 0;
+        }}
+        
+        .layer-name {{
+            color: #2c3e50;
+            font-weight: 600;
+            font-size: 13px;
+            margin-bottom: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }}
+        
+        .layer-type {{
+            color: #7f8c8d;
+            font-size: 11px;
+            background: rgba(52, 152, 219, 0.1);
+            padding: 2px 6px;
+            border-radius: 10px;
+            display: inline-block;
+        }}
+        
+        .layer-details {{
+            color: #555;
+            font-size: 11px;
+            margin-top: 8px;
+            line-height: 1.4;
+        }}
+        
+        /* 控制面板 */
+        .controls {{
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(255,255,255,0.95);
+            backdrop-filter: blur(15px);
+            border: 1px solid rgba(0,0,0,0.2);
+            border-radius: 12px;
+            padding: 15px;
+            color: #2c3e50;
+            z-index: 1000;
+            min-width: 280px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+        }}
+        
+        .control-group {{
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+        }}
+        
+        .control-group:last-child {{
+            margin-bottom: 0;
+        }}
+        
+        .control-label {{
+            font-weight: 600;
             color: #555;
             margin-right: 10px;
+            min-width: 80px;
+            font-size: 12px;
         }}
+        
+        .control-value {{
+            color: #3498db;
+            font-family: 'Consolas', monospace;
+            font-size: 12px;
+        }}
+        
+        /* 工具栏 */
+        .toolbar {{
+            position: absolute;
+            top: 50%;
+            left: 20px;
+            transform: translateY(-50%);
+            background: rgba(255,255,255,0.95);
+            backdrop-filter: blur(15px);
+            border: 1px solid rgba(0,0,0,0.2);
+            border-radius: 12px;
+            padding: 10px;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+        }}
+        
+        .tool-button {{
+            width: 40px;
+            height: 40px;
+            background: rgba(255,255,255,0.8);
+            border: 1px solid rgba(0,0,0,0.2);
+            border-radius: 8px;
+            color: #2c3e50;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s ease;
+            font-size: 16px;
+        }}
+        
+        .tool-button:hover {{
+            background: rgba(52, 152, 219, 0.1);
+            transform: scale(1.05);
+            border-color: #3498db;
+        }}
+        
+        .tool-button.active {{
+            background: #3498db;
+            border-color: #2980b9;
+            color: #fff;
+        }}
+        
+        /* 弹出框样式优化 */
         .leaflet-popup-content {{
+            background: rgba(255,255,255,0.95);
+            color: #2c3e50;
+            border-radius: 8px;
             max-width: 300px;
         }}
+        
         .popup-title {{
-            font-weight: bold;
+            font-weight: 600;
             margin-bottom: 8px;
-            color: #333;
+            color: #3498db;
+            border-bottom: 1px solid rgba(0,0,0,0.1);
+            padding-bottom: 4px;
         }}
+        
         .popup-properties {{
             font-size: 12px;
         }}
+        
         .popup-property {{
-            margin: 3px 0;
-            padding: 2px 0;
-            border-bottom: 1px solid #eee;
+            margin: 4px 0;
+            padding: 3px 0;
+            border-bottom: 1px solid rgba(0,0,0,0.05);
         }}
+        
         .property-key {{
-            font-weight: bold;
+            font-weight: 600;
             color: #555;
         }}
+        
         .property-value {{
             color: #777;
-            margin-left: 5px;
+            margin-left: 8px;
+        }}
+        
+        /* Leaflet控件样式优化 - 确保在最上层 */
+        .leaflet-control-layers {{
+            background: rgba(255,255,255,0.95) !important;
+            color: #2c3e50 !important;
+            border: 1px solid rgba(0,0,0,0.2) !important;
+            border-radius: 8px !important;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 4px 20px rgba(0,0,0,0.15) !important;
+            z-index: 1001 !important;  /* 确保在图层面板之上 */
+        }}
+        
+        .leaflet-control-layers-toggle {{
+            background-color: rgba(255,255,255,0.95) !important;
+            color: #2c3e50 !important;
+        }}
+        
+        .leaflet-control-zoom {{
+            z-index: 1001 !important;  /* 确保在图层面板之上 */
+        }}
+        
+        .leaflet-control-zoom a {{
+            background-color: rgba(255,255,255,0.95) !important;
+            color: #2c3e50 !important;
+            border: 1px solid rgba(0,0,0,0.2) !important;
+        }}
+        
+        .leaflet-control-scale {{
+            background: rgba(255,255,255,0.95) !important;
+            color: #2c3e50 !important;
+            border: 1px solid rgba(0,0,0,0.2) !important;
+            border-radius: 6px !important;
+        }}
+        
+        /* 坐标系统信息 */
+        .coord-system-info {{
+            background: rgba(255,255,255,0.95) !important;
+            color: #2c3e50 !important;
+            border: 1px solid rgba(0,0,0,0.2) !important;
+            border-radius: 8px !important;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1) !important;
+        }}
+        
+        /* 响应式设计 */
+        @media (max-width: 768px) {{
+            .layers-panel {{
+                width: 280px;
+                right: 10px;
+                top: 80px;
+            }}
+            
+            .controls {{
+                left: 10px;
+                bottom: 10px;
+                min-width: 250px;
+            }}
+            
+            .toolbar {{
+                left: 10px;
+            }}
+            
+            .map-header {{
+                padding: 10px 15px;
+            }}
+            
+            .map-title {{
+                font-size: 18px;
+            }}
+        }}
+        
+        /* 滚动条样式 */
+        .panel-content::-webkit-scrollbar {{
+            width: 6px;
+        }}
+        
+        .panel-content::-webkit-scrollbar-track {{
+            background: rgba(0,0,0,0.1);
+            border-radius: 3px;
+        }}
+        
+        .panel-content::-webkit-scrollbar-thumb {{
+            background: rgba(0,0,0,0.3);
+            border-radius: 3px;
+        }}
+        
+        .panel-content::-webkit-scrollbar-thumb:hover {{
+            background: rgba(0,0,0,0.5);
         }}
         """
-    
-    def _get_composite_map_javascript(self, center: List[float], zoom: int, layers_js: str) -> str:
-        """获取复合地图JavaScript - 修复多种坐标系统支持"""
+        
+    def _get_composite_map_styles_modified(self, width: int, height: int) -> str:
+        """获取修改后的复合地图样式 - 按钮跟随面板移动"""
         return f"""
-        // 初始化地图 - 使用Web Mercator投影确保兼容性
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+        
+        body {{ 
+            margin: 0; 
+            padding: 0; 
+            font-family: 'Microsoft YaHei', Arial, sans-serif; 
+            background-color: #f5f5f5;
+            overflow: hidden;
+            height: 100vh;
+        }}
+        
+        .map-container {{ 
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            background: #fff;
+        }}
+        
+        /* 全屏地图 */
+        #map {{ 
+            width: 100vw !important; 
+            height: 100vh !important; 
+            border: none;
+            z-index: 1;
+        }}
+        
+        /* 弹簧式左侧图层面板 - 默认完全隐藏 */
+        .layers-panel-left {{
+            position: absolute;
+            top: 50%;
+            left: 0;
+            transform: translateY(-50%) translateX(-100%);
+            width: 350px;
+            height: 500px;
+            background: rgba(255,255,255,0.95);
+            backdrop-filter: blur(15px);
+            border: 1px solid rgba(0,0,0,0.2);
+            border-left: none;
+            border-radius: 0 12px 12px 0;
+            z-index: 500;
+            transition: all 0.4s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+            overflow: hidden;
+            box-shadow: 2px 0 25px rgba(0,0,0,0.15);
+        }}
+        
+        /* 面板展开状态 - 弹簧式滑入 */
+        .layers-panel-left:not(.collapsed) {{
+            transform: translateY(-50%) translateX(0);
+        }}
+        
+        /* 弹簧式控制按钮 - 独立定位，跟随面板移动 */
+        .spring-toggle-button {{
+            position: absolute;
+            top: calc(50% - 250px + 15px); /* 对应面板顶部位置 */
+            left: 360px; /* 面板展开时的位置：面板宽度350px + 10px间距 */
+            width: 40px;
+            height: 40px;
+            background: linear-gradient(135deg, #3498db 0%, #2980b9 100%);
+            backdrop-filter: blur(10px);
+            border: 2px solid rgba(255,255,255,0.3);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.4s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+            box-shadow: 0 4px 15px rgba(52, 152, 219, 0.4);
+            z-index: 501;
+        }}
+        
+        /* 面板收缩时按钮位置 - 停留在左边界 */
+        .layers-panel-left.collapsed ~ .spring-toggle-button {{
+            left: 10px; /* 停留在左边界 */
+            background: linear-gradient(135deg, #3498db 0%, #2980b9 100%);
+        }}
+        
+        /* 面板展开时按钮位置和样式 */
+        .layers-panel-left:not(.collapsed) ~ .spring-toggle-button {{
+            left: 360px; /* 跟随面板移动到右侧 */
+            background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%);
+            box-shadow: 0 4px 15px rgba(231, 76, 60, 0.4);
+        }}
+        
+        .spring-toggle-button:hover {{
+            transform: scale(1.1) rotate(5deg);
+            box-shadow: 0 6px 20px rgba(52, 152, 219, 0.6);
+        }}
+        
+        .layers-panel-left:not(.collapsed) ~ .spring-toggle-button:hover {{
+            box-shadow: 0 6px 20px rgba(231, 76, 60, 0.6);
+        }}
+        
+        .spring-icon {{
+            color: #fff;
+            font-size: 18px;
+            font-weight: bold;
+            transition: all 0.3s ease;
+        }}
+        
+        /* 面板展开时按钮图标变为向左箭头 */
+        .layers-panel-left:not(.collapsed) ~ .spring-toggle-button .spring-icon {{
+            transform: rotate(180deg);
+        }}
+        
+        .panel-header {{
+            background: linear-gradient(135deg, #3498db 0%, #2980b9 100%);
+            color: #fff;
+            padding: 15px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            border-bottom: 1px solid rgba(255,255,255,0.2);
+            user-select: none;
+            position: relative;
+        }}
+        
+        .panel-title {{
+            font-weight: 600;
+            font-size: 16px;
+            flex: 1;
+        }}
+        
+        /* 面板内容区域 - 固定高度，支持滚动 */
+        .panel-content {{
+            height: calc(500px - 60px);
+            overflow-y: auto;
+            padding: 0;
+        }}
+        
+        .panel-content::-webkit-scrollbar {{
+            width: 8px;
+        }}
+        
+        .panel-content::-webkit-scrollbar-track {{
+            background: rgba(0,0,0,0.1);
+            border-radius: 4px;
+            margin: 5px;
+        }}
+        
+        .panel-content::-webkit-scrollbar-thumb {{
+            background: rgba(52, 152, 219, 0.6);
+            border-radius: 4px;
+        }}
+        
+        .panel-content::-webkit-scrollbar-thumb:hover {{
+            background: rgba(52, 152, 219, 0.8);
+        }}
+        
+        /* 图层卡片 */
+        .layer-card {{
+            background: rgba(0,0,0,0.02);
+            border-bottom: 1px solid rgba(0,0,0,0.1);
+            padding: 18px;
+            transition: all 0.3s ease;
+        }}
+        
+        .layer-card:hover {{
+            background: rgba(52, 152, 219, 0.05);
+        }}
+        
+        .layer-card:last-child {{
+            border-bottom: none;
+        }}
+        
+        .layer-header {{
+            display: flex;
+            align-items: center;
+            margin-bottom: 12px;
+        }}
+        
+        .layer-thumbnail {{
+            width: 45px;
+            height: 45px;
+            border-radius: 8px;
+            margin-right: 15px;
+            background: linear-gradient(135deg, #3498db, #2980b9);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #fff;
+            font-weight: bold;
+            font-size: 14px;
+            flex-shrink: 0;
+            border: 2px solid rgba(255,255,255,0.3);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }}
+        
+        .layer-info {{
+            flex: 1;
+            min-width: 0;
+        }}
+        
+        .layer-name {{
+            color: #2c3e50;
+            font-weight: 600;
+            font-size: 14px;
+            margin-bottom: 5px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }}
+        
+        .layer-type {{
+            color: #7f8c8d;
+            font-size: 12px;
+            background: rgba(52, 152, 219, 0.1);
+            padding: 3px 8px;
+            border-radius: 12px;
+            display: inline-block;
+        }}
+        
+        .layer-details {{
+            color: #555;
+            font-size: 12px;
+            margin-top: 10px;
+            line-height: 1.5;
+        }}
+        
+        .layer-details div {{
+            margin-bottom: 4px;
+        }}
+        
+        .layer-details strong {{
+            color: #2c3e50;
+        }}
+        
+        /* 右侧工具栏 */
+        .toolbar-right {{
+            position: absolute;
+            top: 50%;
+            right: 20px;
+            transform: translateY(-50%);
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            z-index: 600;
+        }}
+        
+        .tool-button {{
+            width: 50px;
+            height: 50px;
+            background: rgba(255,255,255,0.95);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(0,0,0,0.2);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            font-size: 20px;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }}
+        
+        .tool-button:hover {{
+            background: rgba(52, 152, 219, 0.9);
+            color: #fff;
+            transform: scale(1.1);
+            box-shadow: 0 6px 20px rgba(0,0,0,0.2);
+        }}
+        
+        /* 左下角控制面板 */
+        .controls {{
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(255,255,255,0.95);
+            backdrop-filter: blur(15px);
+            border: 1px solid rgba(0,0,0,0.2);
+            border-radius: 12px;
+            padding: 15px;
+            z-index: 500;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+            min-width: 280px;
+        }}
+        
+        .control-group {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+            font-size: 12px;
+        }}
+        
+        .control-group:last-child {{
+            margin-bottom: 0;
+        }}
+        
+        .control-label {{
+            color: #555;
+            font-weight: 600;
+        }}
+        
+        .control-value {{
+            color: #2c3e50;
+            font-family: 'Courier New', monospace;
+            background: rgba(52, 152, 219, 0.1);
+            padding: 2px 6px;
+            border-radius: 4px;
+        }}
+        
+        /* Leaflet控件样式优化 */
+        .leaflet-control-container .leaflet-control {{
+            background: rgba(255,255,255,0.95) !important;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(0,0,0,0.2) !important;
+            border-radius: 8px !important;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1) !important;
+            z-index: 1001 !important;
+        }}
+        
+        /* 响应式设计 */
+        @media (max-width: 768px) {{
+            .layers-panel-left {{
+                width: 300px;
+                height: 400px;
+            }}
+            
+            .spring-toggle-button {{
+                width: 35px;
+                height: 35px;
+                top: calc(50% - 200px + 15px);
+            }}
+            
+            .layers-panel-left.collapsed ~ .spring-toggle-button {{
+                left: 8px;
+            }}
+            
+            .layers-panel-left:not(.collapsed) ~ .spring-toggle-button {{
+                left: 310px;
+            }}
+            
+            .spring-icon {{
+                font-size: 16px;
+            }}
+            
+            .controls {{
+                left: 15px;
+                bottom: 15px;
+                min-width: 250px;
+            }}
+            
+            .toolbar-right {{
+                right: 15px;
+            }}
+        }}
+        """
+    def _get_enhanced_map_javascript(self, center: List[float], zoom: int, layers_js: str) -> str:
+        """获取增强的地图JavaScript代码 - 弹簧式面板控制"""
+        return f"""
+        // 创建地图实例
         var map = L.map('map', {{
-            crs: L.CRS.EPSG3857,  // 使用Web Mercator坐标系
-            center: [{center[0]}, {center[1]}],
+            center: {center},
             zoom: {zoom},
-            worldCopyJump: false,
-            maxBoundsViscosity: 1.0,
-            // 提高坐标转换精度
-            zoomSnap: 0.25,
-            zoomDelta: 0.5
+            zoomControl: true,
+            attributionControl: true
         }});
         
-        // 添加底图 - 确保使用相同的坐标系
-        var osm = L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
-            attribution: '© OpenStreetMap contributors',
-            crs: L.CRS.EPSG3857,
-            tileSize: 256,
-            zoomOffset: 0,
-            continuousWorld: false,
-            noWrap: false
-        }});
-        
+        // 添加Esri卫星底图
         var satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{{z}}/{{y}}/{{x}}.png', {{
             attribution: '© Esri',
             crs: L.CRS.EPSG3857,
             tileSize: 256,
             zoomOffset: 0,
             continuousWorld: false,
-            noWrap: false
+            noWrap: false,
+            maxZoom: 19
         }});
         
-        // 默认添加OSM底图
-        osm.addTo(map);
+        // 默认使用Esri卫星图层
+        satellite.addTo(map);
         
-        // 创建图层控制器
+        // 创建图层控制器 - 修复图层不可见问题
         var baseMaps = {{
-            "OpenStreetMap": osm,
             "卫星影像": satellite
         }};
         
-        var layerControl = L.control.layers(baseMaps, {{}}).addTo(map);
+        var overlayMaps = {{}};
         
-        // 坐标系统信息显示 - 增强版
-        var coordSystemInfo = L.control({{position: 'bottomleft'}});
-        coordSystemInfo.onAdd = function(map) {{
-            var div = L.DomUtil.create('div', 'coord-system-info');
-            div.innerHTML = '<div style="background: rgba(255,255,255,0.9); padding: 8px; border-radius: 4px; font-size: 11px; border: 1px solid #ccc;">' +
-                           '<strong>地图坐标系:</strong> EPSG:3857<br>' +
-                           '<strong>单位:</strong> 米<br>' +
-                           '<div id="crs-status" style="margin-top: 4px; font-size: 10px; color: #666;"></div></div>';
-            return div;
-        }};
-        coordSystemInfo.addTo(map);
-        
-        // 存储所有图层的边界框，用于自动缩放
-        var allLayerBounds = [];
-        
-        // 添加图层 - 坐标对齐处理
-        {layers_js}
-        
-        // 自动缩放到所有图层的边界框
-        setTimeout(function() {{
-            if (allLayerBounds.length > 0) {{
-                var group = new L.featureGroup(allLayerBounds);
-                if (group.getBounds().isValid()) {{
-                    map.fitBounds(group.getBounds(), {{padding: [20, 20]}});
-                    console.log('🎯 自动缩放到图层边界');
-                }} else {{
-                    console.log('📍 使用AI计算的中心点: [{center[0]}, {center[1]}], 缩放级别: {zoom}');
-                }}
-            }} else {{
-                console.log('📍 使用AI计算的中心点: [{center[0]}, {center[1]}], 缩放级别: {zoom}');
-            }}
-        }}, 1000);
-        
-        // 添加比例尺
-        L.control.scale({{
-            metric: true,
-            imperial: false,
-            position: 'bottomright'
+        var layerControl = L.control.layers(baseMaps, overlayMaps, {{
+            position: 'topright',
+            collapsed: false
         }}).addTo(map);
         
-        // 增强的鼠标坐标显示
+        // 存储所有图层边界用于自动缩放
+        var allLayerBounds = [];
+        
+        {layers_js}
+        
+        // 自动缩放到所有图层
+        setTimeout(function() {{
+            fitToLayers();
+        }}, 1000);
+        
+        // 实时更新坐标信息
         map.on('mousemove', function(e) {{
             var latlng = e.latlng;
-            var webMercator = map.project(latlng, map.getZoom());
-            
             document.getElementById('mouse-coords').innerHTML = 
-                '<strong>WGS84:</strong> ' + latlng.lat.toFixed(6) + ', ' + latlng.lng.toFixed(6) + '<br>' +
-                '<strong>Web Mercator:</strong> ' + webMercator.x.toFixed(2) + ', ' + webMercator.y.toFixed(2);
+                latlng.lat.toFixed(6) + ', ' + latlng.lng.toFixed(6);
         }});
         
-        // 地图事件监听 - 增强坐标系统检查
+        // 实时更新地图中心和缩放级别
         map.on('moveend zoomend', function() {{
             var center = map.getCenter();
             var zoom = map.getZoom();
-            var bounds = map.getBounds();
             
             document.getElementById('center-coords').textContent = 
                 center.lat.toFixed(4) + ', ' + center.lng.toFixed(4);
             document.getElementById('zoom-level').textContent = zoom;
-            
-            // 更新坐标系统状态
-            var activeLayerCount = 0;
-            var crsInfo = [];
-            
-            map.eachLayer(function(layer) {{
-                if (layer.options && layer.options.attribution && 
-                    !layer.options.attribution.includes('OpenStreetMap') && 
-                    !layer.options.attribution.includes('Esri')) {{
-                    activeLayerCount++;
-                    if (layer.options.attribution.includes('WMTS')) {{
-                        var crsMatch = layer.options.attribution.match(/\\((.*?)\\)/);
-                        if (crsMatch) {{
-                            crsInfo.push(crsMatch[1]);
-                        }}
-                    }}
-                }}
-            }});
-            
-            var statusDiv = document.getElementById('crs-status');
-            if (statusDiv) {{
-                statusDiv.innerHTML = '活动图层: ' + activeLayerCount + 
-                                    (crsInfo.length > 0 ? '<br>图层CRS: ' + crsInfo.join(', ') : '');
-            }}
         }});
         
-        // 点击地图显示坐标信息 - 增强版
+        // 点击地图显示详细坐标信息
         map.on('click', function(e) {{
             var latlng = e.latlng;
             var webMercator = map.project(latlng, map.getZoom());
             
             var popupContent = '<div style="min-width: 250px;">' +
-                '<h4>坐标信息</h4>' +
-                '<table style="width: 100%; font-size: 12px;">' +
+                '<h4 style="color: #3498db; margin: 0 0 10px 0;">坐标信息</h4>' +
+                '<table style="width: 100%; font-size: 12px; color: #2c3e50;">' +
                 '<tr><td><strong>WGS84 (EPSG:4326):</strong></td></tr>' +
                 '<tr><td>纬度: ' + latlng.lat.toFixed(8) + '</td></tr>' +
                 '<tr><td>经度: ' + latlng.lng.toFixed(8) + '</td></tr>' +
@@ -1114,7 +1895,6 @@ class WebTemplates:
                 '<tr><td>Y: ' + webMercator.y.toFixed(2) + ' 米</td></tr>' +
                 '<tr><td><strong>地图信息:</strong></td></tr>' +
                 '<tr><td>缩放级别: ' + map.getZoom() + '</td></tr>' +
-                '<tr><td>地图CRS: EPSG:3857</td></tr>' +
                 '</table></div>';
                 
             L.popup()
@@ -1123,59 +1903,139 @@ class WebTemplates:
                 .openOn(map);
         }});
         
-        // 图层对齐检查和调试功能
-        window.checkLayerAlignment = function() {{
-            var activeLayers = [];
-            var crsConflicts = [];
+        // 弹簧式图层面板切换功能
+        function toggleLayersPanel() {{
+            var panel = document.getElementById('layersPanel');
+            var button = document.getElementById('springToggleBtn');
             
-            map.eachLayer(function(layer) {{
-                if (layer.options && layer.options.attribution && 
-                    !layer.options.attribution.includes('OpenStreetMap') && 
-                    !layer.options.attribution.includes('Esri')) {{
-                    
-                    var layerInfo = {{
-                        name: layer.options.attribution || 'Unknown Layer',
-                        crs: layer.options.crs ? layer.options.crs.code : 'Unknown CRS',
-                        bounds: layer.getBounds ? layer.getBounds() : 'No bounds',
-                        tileSize: layer.options.tileSize || 'Default',
-                        zoomOffset: layer.options.zoomOffset || 0
-                    }};
-                    
-                    activeLayers.push(layerInfo);
-                    
-                    // 检查CRS冲突
-                    if (layerInfo.crs !== 'EPSG:3857' && layerInfo.crs !== 'Unknown CRS') {{
-                        crsConflicts.push({{
-                            layer: layerInfo.name,
-                            crs: layerInfo.crs,
-                            mapCrs: 'EPSG:3857'
-                        }});
-                    }}
-                }}
-            }});
+            panel.classList.toggle('collapsed');
             
-            console.log('=== 图层对齐检查报告 ===');
-            console.log('活动图层:', activeLayers);
-            
-            if (crsConflicts.length > 0) {{
-                console.warn('⚠️ 发现坐标系冲突:');
-                crsConflicts.forEach(function(conflict) {{
-                    console.warn('- ' + conflict.layer + ': ' + conflict.crs + ' vs 地图: ' + conflict.mapCrs);
-                }});
+            // 添加弹簧动画效果
+            if (panel.classList.contains('collapsed')) {{
+                console.log('🔄 面板收缩 - 弹簧式隐藏');
             }} else {{
-                console.log('✅ 所有图层坐标系统兼容');
+                console.log('🔄 面板展开 - 弹簧式显示');
             }}
-            
-            return {{
-                activeLayers: activeLayers,
-                crsConflicts: crsConflicts,
-                mapCrs: 'EPSG:3857'
-            }};
-        }};
+        }}
         
-        // 自动执行对齐检查
-        setTimeout(function() {{
-            console.log('执行自动图层对齐检查...');
-            window.checkLayerAlignment();
-        }}, 3000);
+        function toggleFullscreen() {{
+            if (!document.fullscreenElement) {{
+                document.documentElement.requestFullscreen();
+            }} else {{
+                document.exitFullscreen();
+            }}
+        }}
+        
+        function fitToLayers() {{
+            if (allLayerBounds.length > 0) {{
+                var group = new L.featureGroup(allLayerBounds);
+                if (group.getBounds().isValid()) {{
+                    map.fitBounds(group.getBounds(), {{padding: [20, 20]}});
+                    console.log('🎯 缩放到所有图层边界');
+                }}
+            }}
+        }}
+        
+        var measureMode = false;
+        var measurePath = null;
+        var measureMarkers = [];
+        
+        function toggleMeasure() {{
+            measureMode = !measureMode;
+            var button = event.target;
+            
+            if (measureMode) {{
+                button.classList.add('active');
+                button.innerHTML = '📐';
+                map.getContainer().style.cursor = 'crosshair';
+                
+                // 清除之前的测量
+                if (measurePath) {{
+                    map.removeLayer(measurePath);
+                }}
+                measureMarkers.forEach(marker => map.removeLayer(marker));
+                measureMarkers = [];
+                
+                // 开始测量
+                measurePath = L.polyline([], {{color: '#e74c3c', weight: 3}}).addTo(map);
+                
+                map.on('click', onMeasureClick);
+            }} else {{
+                button.classList.remove('active');
+                button.innerHTML = '📏';
+                map.getContainer().style.cursor = '';
+                map.off('click', onMeasureClick);
+            }}
+        }}
+        
+        function onMeasureClick(e) {{
+            if (!measureMode) return;
+            
+            var latlng = e.latlng;
+            measurePath.addLatLng(latlng);
+            
+            // 添加测量点标记
+            var marker = L.circleMarker(latlng, {{
+                color: '#e74c3c',
+                fillColor: '#e74c3c',
+                fillOpacity: 0.8,
+                radius: 4
+            }}).addTo(map);
+            measureMarkers.push(marker);
+            
+            // 计算距离
+            var latlngs = measurePath.getLatLngs();
+            if (latlngs.length > 1) {{
+                var totalDistance = 0;
+                for (var i = 1; i < latlngs.length; i++) {{
+                    totalDistance += latlngs[i-1].distanceTo(latlngs[i]);
+                }}
+                
+                var distanceText = totalDistance > 1000 ? 
+                    (totalDistance / 1000).toFixed(2) + ' km' : 
+                    totalDistance.toFixed(2) + ' m';
+                
+                marker.bindPopup('总距离: ' + distanceText).openPopup();
+            }}
+        }}
+        
+        // 键盘快捷键
+        document.addEventListener('keydown', function(e) {{
+            switch(e.key) {{
+                case 'f':
+                case 'F':
+                    if (e.ctrlKey) {{
+                        e.preventDefault();
+                        toggleFullscreen();
+                    }}
+                    break;
+                case 'l':
+                case 'L':
+                    toggleLayersPanel();
+                    break;
+                case 'Escape':
+                    if (measureMode) {{
+                        toggleMeasure();
+                    }}
+                    break;
+            }}
+        }});
+        
+        // 自动隐藏鼠标指针（全屏模式下）
+        var mouseTimer;
+        document.addEventListener('mousemove', function() {{
+            document.body.style.cursor = 'default';
+            clearTimeout(mouseTimer);
+            mouseTimer = setTimeout(function() {{
+                if (document.fullscreenElement) {{
+                    document.body.style.cursor = 'none';
+                }}
+            }}, 3000);
+        }});
+        
+        console.log('🚀 全屏地理可视化界面已加载');
+        console.log('💡 快捷键: Ctrl+F(全屏), L(图层面板), Esc(退出测量)');
+        console.log('🗺️ 底图: Esri卫星影像');
+        console.log('📍 坐标信息: 实时更新鼠标位置和地图中心');
+        console.log('🎛️ 弹簧式面板: 默认隐藏，按钮在面板右上角外部');
         """
