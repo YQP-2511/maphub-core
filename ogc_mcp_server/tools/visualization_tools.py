@@ -4,9 +4,7 @@
 不包含具体的图层添加功能（已独立为单独的工具文件）
 
 核心工具：
-- clear_visualization_layers: 清空当前图层列表
-- list_current_layers: 列出当前图层
-- create_composite_visualization: 创建多图层复合可视化
+- create_composite_visualization: 创建多图层复合可视化（创建后自动清空图层列表）
 """
 
 import json
@@ -28,79 +26,6 @@ _current_layers: List[Dict[str, Any]] = []
 
 
 @visualization_server.tool
-async def clear_visualization_layers(
-    ctx: Context = None
-) -> Dict[str, Any]:
-    """清空当前图层列表
-    
-    清除所有已添加的图层，为新的可视化做准备
-    
-    Args:
-        ctx: MCP上下文对象
-        
-    Returns:
-        清空操作结果
-    """
-    global _current_layers
-    
-    layer_count = len(_current_layers)
-    _current_layers.clear()
-    
-    if ctx:
-        await ctx.info(f"已清空 {layer_count} 个图层，可以开始新的可视化")
-    
-    return {
-        "success": True,
-        "cleared_layer_count": layer_count,
-        "current_layer_count": 0,
-        "message": f"已清空 {layer_count} 个图层，图层列表已重置"
-    }
-
-
-@visualization_server.tool
-async def list_current_layers(
-    ctx: Context = None
-) -> Dict[str, Any]:
-    """列出当前已添加的图层
-    
-    显示当前图层列表的状态，包括图层类型和增强信息
-    
-    Args:
-        ctx: MCP上下文对象
-        
-    Returns:
-        当前图层列表信息
-    """
-    if not _current_layers:
-        return {
-            "success": True,
-            "layer_count": 0,
-            "layers": [],
-            "message": "当前没有图层，请使用独立的图层添加工具添加图层"
-        }
-    
-    layer_summaries = []
-    for layer in _current_layers:
-        summary = _create_layer_summary(layer)
-        layer_summaries.append(summary)
-    
-    if ctx:
-        await ctx.info(f"当前有 {len(_current_layers)} 个图层待可视化")
-    
-    return {
-        "success": True,
-        "layer_count": len(_current_layers),
-        "layers": layer_summaries,
-        "enhanced_features": {
-            "dynamic_bbox_count": sum(1 for layer in _current_layers if layer.get("dynamic_bbox")),
-            "feature_schema_count": sum(1 for layer in _current_layers if layer.get("feature_schema")),
-            "total_features": sum(len(layer.get("geojson_data", {}).get("features", [])) for layer in _current_layers if layer.get("type") == "wfs")
-        },
-        "message": f"当前有 {len(_current_layers)} 个图层待可视化"
-    }
-
-
-@visualization_server.tool
 async def create_composite_visualization(
     title: Annotated[str, Field(description="可视化标题")] = "多图层复合可视化",
     visualization_type: Annotated[str, Field(description="可视化类型: overlay(叠加显示), comparison(对比显示)")] = "overlay",
@@ -113,6 +38,7 @@ async def create_composite_visualization(
     支持叠加显示和对比显示两种模式
     充分利用现有的web_server服务
     使用AI智能选择主要图层作为中心点参考
+    创建完成后自动清空图层列表，为下次可视化做准备
     
     Args:
         title: 可视化标题
@@ -123,6 +49,8 @@ async def create_composite_visualization(
     Returns:
         可视化结果，包含访问URL
     """
+    global _current_layers
+    
     try:
         if not _current_layers:
             return {
@@ -131,8 +59,10 @@ async def create_composite_visualization(
                 "message": "请先使用独立的图层添加工具添加图层"
             }
         
+        layer_count = len(_current_layers)
+        
         if ctx:
-            await ctx.info(f"正在创建{visualization_type}模式的复合可视化，包含 {len(_current_layers)} 个图层")
+            await ctx.info(f"正在创建{visualization_type}模式的复合可视化，包含 {layer_count} 个图层")
         
         # 获取web服务器实例
         web_server = await get_web_server()
@@ -159,9 +89,19 @@ async def create_composite_visualization(
         else:
             raise ValueError(f"不支持的可视化类型: {visualization_type}")
         
+        # 可视化创建成功后，自动清空图层列表
+        _current_layers.clear()
+        
         if ctx:
             await ctx.info(f"✅ 复合可视化创建成功")
             await ctx.info(f"🌐 访问地址: {result['visualization_url']}")
+            await ctx.info(f"🧹 已自动清空 {layer_count} 个图层，可以开始新的可视化")
+        
+        # 在返回结果中添加清空信息
+        result.update({
+            "cleared_layer_count": layer_count,
+            "auto_cleared": True
+        })
         
         return result
         

@@ -59,7 +59,7 @@ class WebTemplates:
                 <h3>暂无可视化内容</h3>
                 <p>使用MCP工具生成复合地图可视化后，结果将在这里显示</p>
                 <div class='empty-actions'>
-                    <p class='empty-hint'>支持的图层类型：WMS、WMTS、WFS、GeoJSON</p>
+                    <p class='empty-hint'>支持的图层类型：WMS、WMTS、WFS</p>
                 </div>
             </div>
             """
@@ -370,7 +370,7 @@ class WebTemplates:
     <div class="container">
         <div class="header">
             <h1>OGC 复合地图可视化</h1>
-            <p>多图层地理信息可视化平台 - 支持 WMS、WMTS、WFS、GeoJSON</p>
+            <p>多图层地理信息可视化平台 - 支持 WMS、WMTS、WFS</p>
         </div>
         
         <div class="stats">
@@ -524,11 +524,16 @@ class WebTemplates:
             layer_count = len(layers)
             type_display = f"复合地图 ({layer_count} 图层)"
             
-            # 统计不同类型的图层
+            # 统计不同类型的图层 - 将geojson显示为WFS
             layer_types = {}
             for layer in layers:
                 layer_type = layer.get('type', 'unknown')
-                layer_types[layer_type] = layer_types.get(layer_type, 0) + 1
+                # 将geojson类型转换为WFS显示
+                if layer_type == 'geojson':
+                    display_type = 'WFS'
+                else:
+                    display_type = layer_type.upper()
+                layer_types[display_type] = layer_types.get(display_type, 0) + 1
             
             layer_summary = ", ".join([f"{count}个{type_name.upper()}" 
                                      for type_name, count in layer_types.items()])
@@ -548,7 +553,11 @@ class WebTemplates:
                 </div>
             """
         else:
-            type_display = viz_type.upper()
+            # 单图层显示 - 将geojson类型转换为WFS显示
+            if viz_type == 'geojson':
+                type_display = 'WFS'
+            else:
+                type_display = viz_type.upper()
             service_name = layer_info.get('service_name', '未知服务')
             crs = layer_info.get('crs', 'EPSG:4326')
             
@@ -956,7 +965,7 @@ class WebTemplates:
         opacity = layer.get('opacity', 0.8)
         details.append(f"<div><strong>透明度:</strong> {int(opacity * 100)}%</div>")
         
-        return layers_html
+        return '\n'.join(details)
     
     def _get_layer_details_without_url(self, layer: Dict[str, Any]) -> str:
         """获取图层详细信息 - 不包含服务地址"""
