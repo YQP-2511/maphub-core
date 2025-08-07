@@ -25,6 +25,13 @@ from . import visualization_tools
     name="add_wfs_layer",
     description="""添加WFS矢量图层到地图，支持可选的属性过滤功能。
 
+⚠️ 重要：使用过滤功能前必须先调用 get_wfs_layer_attributes 工具！
+
+推荐工作流程：
+1. 先调用 get_wfs_layer_attributes(layer_name) 获取准确的属性名称和示例值
+2. 根据返回的属性信息选择合适的 attribute_filter 和 filter_values
+3. 再调用此工具进行实际的数据获取和过滤
+
 功能特性：
 - 无过滤条件时获取完整数据集（适合数据探索）
 - 支持基于图层资源中真实属性的精确过滤
@@ -42,9 +49,9 @@ from . import visualization_tools
 - 筛选特定类别的要素（基于土地利用、建筑类型等属性）
 - 获取满足特定条件的数据子集
 
-注意：工具会智能匹配属性名，但建议使用准确的属性名以获得最佳结果。
+注意：强烈建议先使用 get_wfs_layer_attributes 工具获取准确的属性信息，避免使用错误的属性名或值。
 """,
-    tags={"wfs", "layer", "vector", "filter", "resource-based", "smart-matching", "flexible"}
+    tags={"wfs", "layer", "vector", "filter", "resource-based", "smart-matching", "flexible", "requires-attributes-check"}
 )
 async def add_wfs_layer(
     layer_name: str,

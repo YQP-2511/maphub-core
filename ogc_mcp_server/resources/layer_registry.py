@@ -42,7 +42,13 @@ async def _get_all_layers() -> List[Dict[str, Any]]:
         return []
 
 
-@layer_registry_server.resource("ogc://layers")
+@layer_registry_server.resource(
+    uri="ogc://layers",
+    name="图层列表",
+    description="获取所有已注册的地理数据图层列表，返回图层数量统计",
+    mime_type="application/json",
+    tags={"ogc", "layers", "registry", "list"}
+)
 async def layers_list(ctx: Context = None) -> Dict[str, Any]:
     """图层列表资源
     
@@ -58,6 +64,7 @@ async def layers_list(ctx: Context = None) -> Dict[str, Any]:
         "layers": layers,
         "timestamp": datetime.now().isoformat()
     }
+
 
 
 async def _build_access_parameters_from_details(layer_details: Dict[str, Any], layer_name: str) -> Dict[str, Any]:
@@ -160,7 +167,13 @@ async def _build_access_parameters_from_details(layer_details: Dict[str, Any], l
     return access_parameters
 
 
-@layer_registry_server.resource("ogc://layer/{layer_name}")
+@layer_registry_server.resource(
+    uri="ogc://layer/{layer_name}",
+    name="图层详情",
+    description="获取指定图层的详细信息，包括访问参数、能力信息和元数据",
+    mime_type="application/json",
+    tags={"ogc", "layer", "details", "metadata"}
+)
 async def layer_detail(ctx: Context, layer_name: str) -> str:
     """获取指定图层的详细信息
     
