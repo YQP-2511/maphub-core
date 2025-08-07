@@ -1,193 +1,644 @@
-"""优化的WFS图层添加工具
+"""简化的WFS图层工具
 
-基于FastMCP最佳实践重构，简化资源访问，提高可靠性
+基于WFS标准HTTP请求，支持完整的过滤和排序功能
+分为多个清晰的模块：URL构建、过滤器、排序、数据获取
 """
 
 import json
 import logging
-import asyncio
 import aiohttp
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
 from urllib.parse import urlencode, quote
 from fastmcp import FastMCP, Context
-from pydantic import Field
-from typing_extensions import Annotated
 
 logger = logging.getLogger(__name__)
 
-# 创建优化的WFS图层工具服务器
-wfs_layer_server = FastMCP(name="优化WFS图层工具")
+# 创建WFS图层工具服务器
+wfs_layer_server = FastMCP(name="WFS图层工具")
 
 # 导入全局图层存储
 from . import visualization_tools
 
 
+# ==================== 模块1: WFS URL构建器 ====================
+
+class WFSURLBuilder:
+    """WFS请求URL构建器"""
+    
+    def __init__(self, service_url: str, layer_name: str):
+        self.service_url = service_url.rstrip('?&')
+        self.layer_name = layer_name
+        self.base_params = {
+            'service': 'WFS',
+            'version': '2.0.0',
+            'request': 'GetFeature',
+            'typeNames': layer_name,
+            'outputFormat': 'application/json'
+        }
+    
+    def build_url(self, 
+                  cql_filter: Optional[str] = None,
+                  sort_by: Optional[str] = None,
+                  max_features: int = 1000,
+                  bbox: Optional[List[float]] = None,
+                  srs_name: str = "EPSG:4326",
+                  property_names: Optional[List[str]] = None) -> str:
+        """构建完整的WFS GetFeature URL
+        
+        Args:
+            cql_filter: CQL过滤表达式
+            sort_by: 排序字段，格式：'field_name' 或 'field_name+D'(降序)
+            max_features: 最大要素数量
+            bbox: 边界框 [minx, miny, maxx, maxy]
+            srs_name: 坐标参考系统
+            property_names: 指定返回的属性字段
+            
+        Returns:
+            完整的WFS请求URL
+        """
+        params = self.base_params.copy()
+        
+        # 添加基础参数
+        if max_features > 0:
+            # WFS 2.0.0使用count参数，早期版本使用maxFeatures参数
+            if self.base_params.get('version') == '2.0.0':
+                params['count'] = str(max_features)
+            else:
+                params['maxFeatures'] = str(max_features)
+        
+        if srs_name:
+            params['srsName'] = srs_name
+        
+        # 添加空间过滤
+        if bbox and len(bbox) == 4:
+            params['bbox'] = f"{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]},{srs_name}"
+        
+        # 添加属性选择
+        if property_names:
+            params['propertyName'] = ','.join(property_names)
+        
+        # 添加CQL过滤器
+        if cql_filter:
+            params['cql_filter'] = cql_filter
+        
+        # 添加排序
+        if sort_by:
+            params['sortBy'] = sort_by
+        
+        # 构建URL
+        query_string = urlencode(params, quote_via=quote)
+        separator = '&' if '?' in self.service_url else '?'
+        
+        return f"{self.service_url}{separator}{query_string}"
+
+
+# ==================== 模块2: CQL过滤器构建器 ====================
+
+class CQLFilterBuilder:
+    """CQL过滤器构建器，支持多种过滤条件组合"""
+    
+    @staticmethod
+    def build_simple_filter(attribute: str, values: Union[str, List[str]], operator: str = "=") -> str:
+        """构建简单过滤条件
+        
+        Args:
+            attribute: 属性名
+            values: 值或值列表
+            operator: 操作符 (=, !=, >, <, >=, <=, LIKE, IN, BETWEEN)
+            
+        Returns:
+            CQL过滤表达式
+        """
+        if isinstance(values, str):
+            values = [values]
+        
+        # 智能处理数值和字符串
+        processed_values = []
+        for v in values:
+            str_v = str(v)
+            # 检查是否为数值（整数或小数）
+            if CQLFilterBuilder._is_numeric(str_v):
+                processed_values.append(str_v)  # 数值不加引号
+            else:
+                # 字符串需要转义单引号并加引号
+                escaped_v = str_v.replace("'", "''")
+                processed_values.append(f"'{escaped_v}'")
+        
+        if operator.upper() == "IN" or (operator == "=" and len(values) > 1):
+            return f"{attribute} IN ({', '.join(processed_values)})"
+        
+        elif operator.upper() == "LIKE":
+            # LIKE操作符总是需要引号，因为它用于字符串匹配
+            original_value = str(values[0]).replace("'", "''")
+            return f"{attribute} LIKE '%{original_value}%'"
+        
+        elif operator.upper() == "BETWEEN":
+            # BETWEEN操作符需要两个值
+            if len(processed_values) < 2:
+                raise ValueError(f"BETWEEN操作符需要两个值，但只提供了 {len(processed_values)} 个")
+            return f"{attribute} BETWEEN {processed_values[0]} AND {processed_values[1]}"
+        
+        elif operator in ["=", "!=", ">", "<", ">=", "<="]:
+            return f"{attribute} {operator} {processed_values[0]}"
+        
+        else:
+            raise ValueError(f"不支持的操作符: {operator}")
+    
+    @staticmethod
+    def _is_numeric(value: str) -> bool:
+        """检查字符串是否为数值（整数或小数）
+        
+        Args:
+            value: 要检查的字符串
+            
+        Returns:
+            如果是数值返回True，否则返回False
+        """
+        try:
+            float(value)
+            return True
+        except ValueError:
+            return False
+    
+    @staticmethod
+    def build_range_filter(attribute: str, min_value: str, max_value: str) -> str:
+        """构建范围过滤条件"""
+        # 智能处理数值和字符串
+        if CQLFilterBuilder._is_numeric(min_value) and CQLFilterBuilder._is_numeric(max_value):
+            return f"{attribute} BETWEEN {min_value} AND {max_value}"
+        else:
+            min_escaped = str(min_value).replace("'", "''")
+            max_escaped = str(max_value).replace("'", "''")
+            return f"{attribute} BETWEEN '{min_escaped}' AND '{max_escaped}'"
+    
+    @staticmethod
+    def combine_filters(filters: List[str], logic: str = "AND") -> str:
+        """组合多个过滤条件
+        
+        Args:
+            filters: 过滤条件列表
+            logic: 逻辑操作符 (AND, OR)
+            
+        Returns:
+            组合后的CQL表达式
+        """
+        if not filters:
+            return ""
+        
+        if len(filters) == 1:
+            return filters[0]
+        
+        logic_op = f" {logic.upper()} "
+        return f"({logic_op.join(filters)})"
+    
+    @staticmethod
+    def build_from_json(filter_config: Dict[str, Any]) -> str:
+        """从JSON配置构建CQL过滤器
+        
+        JSON格式示例:
+        {
+            "filters": [
+                {"attribute": "CITY_NAME", "values": ["北京", "上海"], "operator": "IN"},
+                {"attribute": "POPULATION", "values": ["1000000"], "operator": ">"},
+                {"attribute": "LAND_KM", "values": ["100000", "500000"], "operator": "BETWEEN"}
+            ],
+            "logic": "AND"
+        }
+        """
+        filters_list = filter_config.get("filters", [])
+        logic = filter_config.get("logic", "AND")
+        
+        cql_parts = []
+        for filter_item in filters_list:
+            attribute = filter_item.get("attribute")
+            values = filter_item.get("values", [])
+            operator = filter_item.get("operator", "=")
+            
+            if attribute and values:
+                # 对于BETWEEN操作符，使用专门的build_range_filter方法
+                if operator.upper() == "BETWEEN" and len(values) >= 2:
+                    cql_part = CQLFilterBuilder.build_range_filter(attribute, values[0], values[1])
+                else:
+                    cql_part = CQLFilterBuilder.build_simple_filter(attribute, values, operator)
+                cql_parts.append(cql_part)
+        
+        return CQLFilterBuilder.combine_filters(cql_parts, logic)
+
+
+# ==================== 模块3: 排序构建器 ====================
+
+class SortBuilder:
+    """WFS排序参数构建器"""
+    
+    @staticmethod
+    def build_sort_param(sort_config: Union[str, Dict[str, Any]]) -> str:
+        """构建sortBy参数
+        
+        Args:
+            sort_config: 排序配置
+                - 字符串格式: "field_name" 或 "field_name+D"
+                - 字典格式: {"attribute": "field_name", "order": "asc|desc"}
+                - 多字段: [{"attribute": "field1", "order": "asc"}, ...]
+                
+        Returns:
+            sortBy参数值
+        """
+        if isinstance(sort_config, str):
+            return sort_config
+        
+        elif isinstance(sort_config, dict):
+            attribute = sort_config.get("attribute")
+            order = sort_config.get("order", "asc").lower()
+            
+            if not attribute:
+                raise ValueError("排序配置缺少attribute字段")
+            
+            # 修复：使用空格分隔格式，这是WFS标准格式
+            if order == "desc":
+                return f"{attribute} D"
+            else:
+                return f"{attribute} A"
+        
+        elif isinstance(sort_config, list):
+            # 多字段排序
+            sort_parts = []
+            for item in sort_config:
+                if isinstance(item, dict):
+                    part = SortBuilder.build_sort_param(item)
+                    sort_parts.append(part)
+            return ",".join(sort_parts)
+        
+        else:
+            raise ValueError(f"不支持的排序配置类型: {type(sort_config)}")
+
+
+# ==================== 模块4: 数据获取器 ====================
+
+class WFSDataFetcher:
+    """WFS数据获取器"""
+    
+    def __init__(self, timeout: int = 60):
+        self.timeout = timeout
+    
+    async def fetch_data(self, url: str, ctx: Optional[Context] = None) -> Dict[str, Any]:
+        """获取WFS数据
+        
+        Args:
+            url: WFS请求URL
+            ctx: MCP上下文
+            
+        Returns:
+            GeoJSON格式的数据
+        """
+        if ctx:
+            await ctx.info(f"🌐 发送WFS请求: {url}")
+            await ctx.debug(f"🔍 完整URL: {url}")
+        
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.timeout)) as session:
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        if ctx:
+                            await ctx.error(f"HTTP {response.status} 错误响应: {error_text[:200]}")
+                        raise Exception(f"HTTP错误 {response.status}: {error_text}")
+                    
+                    content_type = response.headers.get('content-type', '').lower()
+                    if 'json' not in content_type:
+                        text_content = await response.text()
+                        if 'exception' in text_content.lower() or 'error' in text_content.lower():
+                            raise Exception(f"WFS服务错误: {text_content[:500]}")
+                    
+                    data = await response.json()
+                    
+                    # 验证GeoJSON格式
+                    if not isinstance(data, dict) or data.get("type") != "FeatureCollection":
+                        raise Exception("返回数据不是有效的GeoJSON格式")
+                    
+                    features = data.get("features", [])
+                    if ctx:
+                        await ctx.info(f"✅ 成功获取 {len(features)} 个要素")
+                    
+                    return data
+                    
+        except Exception as e:
+            error_msg = f"WFS数据获取失败: {str(e)}"
+            if ctx:
+                await ctx.error(error_msg)
+            raise Exception(error_msg)
+
+
+# ==================== 模块5: 图层信息获取器 ====================
+
+async def get_layer_info_from_registry(layer_name: str, ctx: Optional[Context] = None) -> Dict[str, Any]:
+    """从图层注册表获取图层信息
+    
+    Args:
+        layer_name: 图层名称
+        ctx: MCP上下文对象
+        
+    Returns:
+        图层详细信息字典
+        
+    Raises:
+        ValueError: 当无法获取图层信息时
+    """
+    try:
+        # 使用MCP资源读取机制获取图层详情
+        if not ctx:
+            raise ValueError("需要MCP上下文来读取资源")
+        
+        # 读取图层详细资源
+        layer_resource_result = await ctx.read_resource(f"ogc://layer/{layer_name}")
+        
+        if not layer_resource_result or not layer_resource_result[0].content:
+            raise ValueError(f"无法获取图层 '{layer_name}' 的详细信息")
+        
+        layer_content = layer_resource_result[0].content
+        
+        # 处理不同类型的资源数据
+        layer_info: Dict[str, Any] = {}
+        
+        if isinstance(layer_content, str):
+            # 字符串类型，需要JSON解析
+            layer_info = json.loads(layer_content)
+        elif isinstance(layer_content, bytes):
+            # 字节类型，先解码再JSON解析
+            layer_info = json.loads(layer_content.decode('utf-8'))
+        elif isinstance(layer_content, dict):
+            # 字典类型，直接使用
+            layer_info = layer_content
+        else:
+            # 其他类型，尝试转换为字符串再解析
+            layer_info = json.loads(str(layer_content))
+        
+        # 检查是否有错误信息
+        if isinstance(layer_info, dict) and "error" in layer_info:
+            raise ValueError(layer_info["error"])
+        
+        return layer_info
+        
+    except json.JSONDecodeError as e:
+        error_msg = f"解析图层信息JSON失败: {str(e)}"
+        if ctx:
+            await ctx.error(error_msg)
+        raise ValueError(error_msg)
+    except Exception as e:
+        error_msg = f"获取图层信息失败: {str(e)}"
+        if ctx:
+            await ctx.error(error_msg)
+        raise ValueError(error_msg)
+
+
+# ==================== 主工具函数 ====================
+
 @wfs_layer_server.tool(
     name="add_wfs_layer",
-    description="""添加WFS矢量图层到地图，支持高性能多属性过滤功能。
+    description="""添加WFS矢量图层，支持完整的过滤和排序功能。
 
-⚠️ 重要：使用过滤功能前建议先调用 get_wfs_layer_attributes 工具获取属性信息！
+🔍 查询参数 (JSON格式):
+{
+  "filters": [
+    {"attribute": "CITY_NAME", "values": ["北京","上海"], "operator": "IN"},
+    {"attribute": "POPULATION", "values": ["1000000"], "operator": ">"}
+  ],
+  "sort": {"attribute": "POPULATION", "order": "desc"},
+  "limit": 100,
+  "logic": "AND"
+}
 
-🚀 多属性过滤特性：
-- 支持多个属性同时过滤（AND/OR逻辑组合）
-- 丰富的过滤操作符：=, !=, >, <, >=, <=, LIKE, IN, BETWEEN
-- 智能性能优化：自动选择最优查询策略
-- 灵活的过滤模式：简单模式、高级模式、性能优化模式
+📋 支持的操作符:
+- 等于: = 
+- 不等于: !=
+- 大于/小于: >, <, >=, <=
+- 包含: IN (多值)
+- 模糊匹配: LIKE
+- 范围: BETWEEN
 
-📋 过滤参数说明：
-1. 简单单属性过滤：
-   - attribute_filter="CITY_NAME", filter_values="北京,上海"
-   
-2. 多属性过滤（JSON格式）：
-   - multi_filters='[{"attribute":"CITY_NAME","operator":"IN","values":["北京","上海"]},{"attribute":"POPULATION","operator":">","values":["1000000"]}]'
-   
-3. 高级CQL过滤：
-   - advanced_cql="CITY_NAME='北京' AND POPULATION > 1000000"
+🔄 排序选项:
+- 升序: {"attribute": "field_name", "order": "asc"}
+- 降序: {"attribute": "field_name", "order": "desc"}
+- 多字段: [{"attribute": "field1", "order": "asc"}, {"attribute": "field2", "order": "desc"}]
 
-🎯 性能优化选项：
-- performance_mode: "balanced"(默认) | "speed" | "accuracy" | "minimal"
-- use_spatial_index: 启用空间索引优化
-- enable_pagination: 启用分页查询
-- optimize_for_count: 优化要素数量查询
+💡 使用建议:
+- 单属性多值: {"filters": [{"attribute": "CITY_NAME", "values": ["北京","上海"]}]}
+- 数值比较: {"filters": [{"attribute": "P_MALE", "values": ["0.5"], "operator": ">"}]}
+- 排序限制: {"sort": {"attribute":"POPULATION","order":"desc"},"limit":3}
+- 复合查询: 组合过滤+排序+限制+逻辑运算符
 
-💡 AI自主选择建议：
-- 大数据集(>10000要素)：使用performance_mode="speed"
-- 复杂查询：使用performance_mode="accuracy" 
-- 快速预览：使用performance_mode="minimal"
-- 精确分析：使用performance_mode="balanced"
-
-适用场景：
-- 多维度数据筛选（地区+类型+时间等）
-- 数值范围查询（人口、面积、高程等）
-- 模糊匹配搜索（地名、描述等）
-- 复合条件查询（多个条件组合）
-- 大数据集高性能查询
+📊 常见数值字段示例:
+- 人口数量: PERSONS (整数)
+- 男性比例: P_MALE (小数，如0.493表示49.3%)
+- 土地面积: LAND_KM (小数)
+- 水域面积: WATER_KM (小数)
 """,
-    tags={"wfs", "layer", "vector", "multi-filter", "performance", "smart-query", "flexible", "ai-optimized"}
+    tags={"wfs", "layer", "vector", "filter", "sort", "query", "numeric"}
 )
 async def add_wfs_layer(
     layer_name: str,
-    # 简单过滤参数（向后兼容）
-    attribute_filter: Optional[str] = None,
-    filter_values: Optional[str] = None,
-    # 多属性过滤参数
-    multi_filters: Optional[str] = None,
-    # 高级CQL过滤
-    advanced_cql: Optional[str] = None,
-    # 性能优化参数
-    performance_mode: str = "balanced",  # balanced, speed, accuracy, minimal
-    use_spatial_index: bool = True,
-    enable_pagination: bool = False,
-    optimize_for_count: bool = False,
-    # 其他参数
+    query: Optional[str] = None,
     max_features: int = 1000,
     layer_title: Optional[str] = None,
     ctx: Optional[Context] = None
 ) -> Dict[str, Any]:
-    """添加WFS图层到地图，支持高性能多属性过滤
+    """添加WFS图层到地图
     
     Args:
         layer_name: 图层名称
-        attribute_filter: 单属性过滤名称（简单模式，向后兼容）
-        filter_values: 过滤值，多个值用逗号分隔（简单模式）
-        multi_filters: 多属性过滤JSON字符串（高级模式）
-        advanced_cql: 高级CQL过滤表达式（专家模式）
-        performance_mode: 性能模式 - balanced/speed/accuracy/minimal
-        use_spatial_index: 是否使用空间索引优化
-        enable_pagination: 是否启用分页查询
-        optimize_for_count: 是否优化要素数量查询
+        query: JSON格式的查询参数，包含filters、sort、limit、logic等
         max_features: 最大要素数量
         layer_title: 自定义图层标题
         ctx: MCP上下文
-    
+        
     Returns:
-        包含操作结果的字典
+        操作结果字典
     """
     try:
-        # 分析过滤模式和参数
-        filter_analysis = _analyze_filter_parameters(
-            attribute_filter, filter_values, multi_filters, advanced_cql, ctx
-        )
-        
         if ctx:
             await ctx.info(f"🔍 开始添加WFS图层: {layer_name}")
-            await ctx.info(f"📊 过滤模式: {filter_analysis['mode']}")
-            await ctx.info(f"⚡ 性能模式: {performance_mode}")
-            if filter_analysis['has_filter']:
-                await ctx.info(f"🎯 过滤条件数量: {filter_analysis['filter_count']}")
         
         # 获取图层信息
-        layer_info = await _get_layer_info_simplified(layer_name, ctx)
+        layer_info = await get_layer_info_from_registry(layer_name, ctx)
         
         # 验证WFS支持
-        if not _validate_wfs_support(layer_info, layer_name):
+        wfs_params = layer_info.get("access_parameters", {}).get("wfs")
+        if not wfs_params:
             supported_services = layer_info.get("metadata", {}).get("supported_services", [])
             raise ValueError(
                 f"图层 '{layer_name}' 不支持WFS服务。"
                 f"支持的服务类型: {', '.join(supported_services) if supported_services else '无'}"
             )
         
-        # 构建优化的过滤器
-        filter_info = await _build_advanced_filter(
-            layer_info, filter_analysis, performance_mode, ctx
-        )
+        # 获取服务URL并确保是WFS端点
+        service_url = layer_info.get("basic_info", {}).get("service_url", "")
+        if not service_url:
+            raise ValueError(f"图层 '{layer_name}' 缺少服务URL")
         
-        # 应用性能优化策略
-        query_config = _build_performance_config(
-            performance_mode, use_spatial_index, enable_pagination, 
-            optimize_for_count, max_features, filter_info
+        # 确保服务URL指向WFS端点
+        if "wmts" in service_url.lower():
+            # 如果是WMTS URL，转换为WFS URL
+            service_url = service_url.replace("/gwc/service/wmts", "/wfs").replace("/wmts", "/wfs")
+        elif not service_url.endswith(("/wfs", "/ows")):
+            # 如果不是标准的WFS端点，添加/wfs
+            if service_url.endswith("/"):
+                service_url = service_url + "wfs"
+            else:
+                service_url = service_url + "/wfs"
+        
+        if ctx:
+            await ctx.debug(f"🔧 优化后的WFS服务URL: {service_url}")
+        
+        # 解析查询参数
+        query_config = {}
+        if query:
+            try:
+                query_config = json.loads(query)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"查询参数JSON格式错误: {str(e)}")
+        
+        # 构建URL
+        url_builder = WFSURLBuilder(service_url, layer_name)
+        
+        # 构建CQL过滤器
+        cql_filter = None
+        if query_config.get("filters"):
+            cql_filter = CQLFilterBuilder.build_from_json(query_config)
+            if ctx:
+                await ctx.info(f"🎯 CQL过滤器: {cql_filter}")
+        
+        # 构建排序参数
+        sort_by = None
+        if query_config.get("sort"):
+            sort_by = SortBuilder.build_sort_param(query_config["sort"])
+            if ctx:
+                await ctx.info(f"📊 排序参数: {sort_by}")
+        
+        # 应用限制
+        effective_max_features = query_config.get("limit", max_features)
+        
+        # 构建完整URL
+        wfs_url = url_builder.build_url(
+            cql_filter=cql_filter,
+            sort_by=sort_by,
+            max_features=effective_max_features,
+            srs_name=wfs_params.get("srsName", "EPSG:4326")
         )
         
         if ctx:
-            await ctx.info(f"🚀 查询配置: {query_config['strategy']}")
+            await ctx.debug(f"🔗 构建的WFS URL: {wfs_url}")
+            await ctx.debug(f"🏗️ 服务基础URL: {service_url}")
+            await ctx.debug(f"📋 WFS参数: {wfs_params}")
         
-        # 获取WFS数据（使用优化配置）
-        geojson_data = await _fetch_wfs_data_advanced(
-            layer_info, query_config, filter_info, ctx
-        )
+        # 获取数据
+        data_fetcher = WFSDataFetcher()
+        geojson_data = await data_fetcher.fetch_data(wfs_url, ctx)
         
-        # 分析查询结果
-        feature_count = len(geojson_data.get("features", []))
-        result_analysis = _analyze_query_results(
-            geojson_data, filter_info, query_config, ctx
-        )
+        # 分析结果
+        features = geojson_data.get("features", [])
+        feature_count = len(features)
         
-        # 如果结果为空且有过滤条件，提供智能建议
-        if feature_count == 0 and filter_analysis['has_filter']:
-            suggestions = await _generate_filter_suggestions(
-                layer_info, filter_info, ctx
-            )
+        # 添加调试信息：显示实际获取的要素数量和期望的数量
+        if ctx:
+            await ctx.info(f"📊 实际获取要素数量: {feature_count}")
+            await ctx.info(f"🎯 期望获取要素数量: {effective_max_features}")
+            if sort_by:
+                await ctx.info(f"🔄 排序参数: {sort_by}")
             
+            # 如果有排序，显示前几个要素的关键属性
+            if sort_by and features:
+                # 修复：正确处理多字段排序的情况
+                sort_config = query_config.get("sort")
+                sort_attribute = None
+                
+                if isinstance(sort_config, dict):
+                    sort_attribute = sort_config.get("attribute")
+                elif isinstance(sort_config, list) and sort_config:
+                    # 对于多字段排序，显示第一个排序字段
+                    first_sort = sort_config[0]
+                    if isinstance(first_sort, dict):
+                        sort_attribute = first_sort.get("attribute")
+                
+                if sort_attribute:
+                    await ctx.info(f"📋 前3个要素的{sort_attribute}值:")
+                    for i, feature in enumerate(features[:3]):
+                        props = feature.get("properties", {})
+                        value = props.get(sort_attribute, "N/A")
+                        state_name = props.get("STATE_NAME", props.get("NAME", f"要素{i+1}"))
+                        await ctx.info(f"  {i+1}. {state_name}: {value}")
+        
+        if feature_count == 0 and (cql_filter or sort_by):
             return {
                 "success": False,
-                "message": "过滤条件未匹配到任何要素",
+                "message": "查询条件未匹配到任何要素",
                 "layer_name": layer_name,
-                "filter_analysis": filter_analysis,
-                "suggestions": suggestions,
-                "performance_info": result_analysis,
+                "query_config": query_config,
+                "wfs_url": wfs_url,
                 "current_layer_count": len(visualization_tools._current_layers)
             }
         
-        # 创建增强的图层对象
-        wfs_layer = _create_advanced_wfs_layer(
-            layer_info, layer_title or layer_name, geojson_data, 
-            filter_info, query_config, result_analysis
-        )
+        # 创建增强的图层对象，包含更多调试信息
+        wfs_layer = {
+            "id": f"wfs_{layer_name}_{len(visualization_tools._current_layers)}",
+            "name": layer_name,
+            "title": layer_title or layer_name,
+            "type": "geojson",  # 修改为geojson类型以匹配模板处理逻辑
+            "service_type": "wfs",  # 添加服务类型标识
+            "source": "wfs_service",
+            "geojson_data": geojson_data,  # 修改字段名以匹配模板期望
+            "data": geojson_data,  # 保留原字段以兼容其他逻辑
+            "feature_count": feature_count,
+            # 添加默认样式配置
+            "style": {
+                "color": "#3388ff",
+                "weight": 2,
+                "opacity": 0.8,
+                "fillColor": "#3388ff",
+                "fillOpacity": 0.2
+            },
+            "opacity": 0.8,  # 添加透明度字段
+            "visible": True,  # 添加可见性字段
+            "query_info": {
+                "has_filter": bool(cql_filter),
+                "has_sort": bool(sort_by),
+                "cql_filter": cql_filter,
+                "sort_by": sort_by,
+                "max_features": effective_max_features,
+                "requested_limit": query_config.get("limit"),
+                "actual_returned": feature_count
+            },
+            "service_info": {
+                "service_url": service_url,
+                "layer_name": layer_name,
+                "wfs_url": wfs_url
+            },
+            # 添加图层信息以匹配模板期望
+            "layer_info": {
+                "service_name": service_url.split('/')[2] if '//' in service_url else "WFS服务",
+                "layer_title": layer_title or layer_name,
+                "crs": "EPSG:4326"
+            },
+            "metadata": {
+                "created_at": json.dumps({"timestamp": "now"}),
+                "source": "wfs_layer_tool_v2"
+            },
+            # 添加几何类型信息以便可视化
+            "geometry_type": _detect_geometry_type(geojson_data),
+            # 添加边界框信息
+            "bbox": _calculate_bbox(geojson_data)
+        }
         
         # 添加到图层列表
         visualization_tools._current_layers.append(wfs_layer)
         
         # 构建成功消息
-        success_msg = f"✅ WFS图层 '{layer_name}' 添加成功"
-        if filter_analysis['has_filter']:
-            success_msg += f"，应用{filter_analysis['mode']}过滤"
-        success_msg += f"，包含 {feature_count} 个要素"
+        success_msg = f"✅ WFS图层 '{layer_name}' 添加成功，包含 {feature_count} 个要素"
+        if cql_filter:
+            success_msg += f"，应用了过滤条件"
+        if sort_by:
+            success_msg += f"，应用了排序"
         
         if ctx:
             await ctx.info(success_msg)
-            await ctx.info(f"📊 查询性能: {result_analysis.get('performance_summary', '未知')}")
-            if filter_info.get('optimization_applied'):
-                await ctx.info("⚡ 已应用性能优化")
         
         return {
             "success": True,
@@ -195,17 +646,12 @@ async def add_wfs_layer(
             "layer_info": {
                 "name": layer_name,
                 "title": wfs_layer["title"],
-                "type": f"wfs_{filter_analysis['mode']}",
+                "type": "wfs",
                 "feature_count": feature_count,
-                "geometry_type": wfs_layer.get("geometry_type"),
-                "filter_applied": filter_analysis['has_filter'],
-                "filter_mode": filter_analysis['mode'],
-                "filter_count": filter_analysis['filter_count'],
-                "performance_mode": performance_mode,
-                "query_strategy": query_config['strategy'],
-                "optimization_applied": filter_info.get('optimization_applied', False)
+                "has_filter": bool(cql_filter),
+                "has_sort": bool(sort_by),
+                "query_config": query_config
             },
-            "performance_info": result_analysis,
             "current_layer_count": len(visualization_tools._current_layers)
         }
         
@@ -218,852 +664,60 @@ async def add_wfs_layer(
             "success": False,
             "error": error_msg,
             "layer_name": layer_name,
-            "filter_analysis": locals().get('filter_analysis', {}),
             "current_layer_count": len(visualization_tools._current_layers)
         }
 
 
-def _analyze_filter_parameters(
-    attribute_filter: Optional[str],
-    filter_values: Optional[str], 
-    multi_filters: Optional[str],
-    advanced_cql: Optional[str],
-    ctx: Optional[Context]
-) -> Dict[str, Any]:
-    """分析过滤参数，确定过滤模式和复杂度"""
-    analysis = {
-        "mode": "none",
-        "has_filter": False,
-        "filter_count": 0,
-        "complexity": "simple",
-        "parameters": {}
-    }
-    
-    # 检查高级CQL模式
-    if advanced_cql and advanced_cql.strip():
-        analysis.update({
-            "mode": "advanced_cql",
-            "has_filter": True,
-            "filter_count": advanced_cql.count("AND") + advanced_cql.count("OR") + 1,
-            "complexity": "expert",
-            "parameters": {"cql": advanced_cql.strip()}
-        })
-        return analysis
-    
-    # 检查多属性过滤模式
-    if multi_filters and multi_filters.strip():
-        try:
-            filters_data = json.loads(multi_filters)
-            if isinstance(filters_data, list) and filters_data:
-                analysis.update({
-                    "mode": "multi_attribute",
-                    "has_filter": True,
-                    "filter_count": len(filters_data),
-                    "complexity": "advanced" if len(filters_data) > 2 else "moderate",
-                    "parameters": {"filters": filters_data}
-                })
-                return analysis
-        except json.JSONDecodeError:
-            if ctx:
-                asyncio.create_task(ctx.warning("⚠️ multi_filters JSON格式错误，回退到简单模式"))
-    
-    # 检查简单单属性模式
-    if attribute_filter and filter_values:
-        values_list = [v.strip() for v in filter_values.split(',') if v.strip()]
-        analysis.update({
-            "mode": "single_attribute",
-            "has_filter": True,
-            "filter_count": 1,
-            "complexity": "moderate" if len(values_list) > 1 else "simple",
-            "parameters": {
-                "attribute": attribute_filter,
-                "values": values_list
-            }
-        })
-        return analysis
-    
-    return analysis
+# ==================== 辅助工具 ====================
 
-
-async def _build_advanced_filter(
-    layer_info: Dict[str, Any],
-    filter_analysis: Dict[str, Any],
-    performance_mode: str,
-    ctx: Optional[Context]
-) -> Dict[str, Any]:
-    """构建高级多属性过滤器"""
-    filter_info = {
-        "cql_filter": None,
-        "description": "无过滤条件",
-        "mode": filter_analysis["mode"],
-        "complexity": filter_analysis["complexity"],
-        "filter_count": filter_analysis["filter_count"],
-        "optimization_applied": False,
-        "performance_hints": []
-    }
-    
-    if not filter_analysis["has_filter"]:
-        return filter_info
-    
-    # 获取可用属性
-    available_attributes = _extract_attributes_from_resource(layer_info, ctx)
-    
-    try:
-        if filter_analysis["mode"] == "advanced_cql":
-            # 高级CQL模式
-            cql_filter = filter_analysis["parameters"]["cql"]
-            filter_info.update({
-                "cql_filter": cql_filter,
-                "description": f"高级CQL过滤: {cql_filter[:100]}{'...' if len(cql_filter) > 100 else ''}",
-                "raw_cql": cql_filter
-            })
-            
-        elif filter_analysis["mode"] == "multi_attribute":
-            # 多属性过滤模式
-            filters_data = filter_analysis["parameters"]["filters"]
-            cql_parts = []
-            descriptions = []
-            
-            for filter_item in filters_data:
-                attribute = filter_item.get("attribute", "")
-                operator = filter_item.get("operator", "=").upper()
-                values = filter_item.get("values", [])
-                logic = filter_item.get("logic", "AND").upper()
-                
-                # 智能属性匹配
-                matched_attr = _smart_match_attribute(attribute, available_attributes, ctx)
-                if not matched_attr:
-                    if ctx:
-                        await ctx.warning(f"⚠️ 属性 '{attribute}' 无法匹配，跳过此过滤条件")
-                    continue
-                
-                # 构建单个过滤条件
-                cql_part = _build_single_filter_cql(matched_attr, operator, values)
-                if cql_part:
-                    cql_parts.append(cql_part)
-                    descriptions.append(f"{matched_attr} {operator} {values}")
-            
-            if cql_parts:
-                # 组合多个过滤条件（默认使用AND）
-                combined_cql = " AND ".join(cql_parts)
-                filter_info.update({
-                    "cql_filter": combined_cql,
-                    "description": f"多属性过滤: {' AND '.join(descriptions)}",
-                    "individual_filters": descriptions
-                })
-            
-        elif filter_analysis["mode"] == "single_attribute":
-            # 简单单属性模式（向后兼容）
-            attribute = filter_analysis["parameters"]["attribute"]
-            values = filter_analysis["parameters"]["values"]
-            
-            matched_attr = _smart_match_attribute(attribute, available_attributes, ctx)
-            if matched_attr:
-                if len(values) == 1:
-                    cql_filter = f"{matched_attr} = '{values[0].replace(chr(39), chr(39)+chr(39))}'"
-                    description = f"单值过滤: {matched_attr} = '{values[0]}'"
-                else:
-                    escaped_values = [f"'{v.replace(chr(39), chr(39)+chr(39))}'" for v in values]
-                    cql_filter = f"{matched_attr} IN ({', '.join(escaped_values)})"
-                    description = f"多值过滤: {matched_attr} IN ({', '.join(values)})"
-                
-                filter_info.update({
-                    "cql_filter": cql_filter,
-                    "description": description,
-                    "matched_attribute": matched_attr,
-                    "filter_values": values
-                })
-        
-        # 应用性能优化
-        if filter_info.get("cql_filter"):
-            filter_info = _apply_performance_optimizations(
-                filter_info, performance_mode, available_attributes, ctx
-            )
-        
-        if ctx and filter_info.get("cql_filter"):
-            await ctx.info(f"🔍 构建的CQL过滤器: {filter_info['cql_filter']}")
-            if filter_info.get("optimization_applied"):
-                await ctx.info("⚡ 已应用性能优化")
-        
-        return filter_info
-        
-    except Exception as e:
-        if ctx:
-            await ctx.error(f"❌ 构建过滤器失败: {str(e)}")
-        raise ValueError(f"构建过滤器失败: {str(e)}")
-
-
-def _build_single_filter_cql(attribute: str, operator: str, values: List[str]) -> Optional[str]:
-    """构建单个属性的CQL过滤条件"""
-    if not values:
-        return None
-    
-    # 转义单引号
-    escaped_values = [str(v).replace("'", "''") for v in values]
-    
-    if operator == "=":
-        if len(values) == 1:
-            return f"{attribute} = '{escaped_values[0]}'"
-        else:
-            quoted_values = [f"'{v}'" for v in escaped_values]
-            return f"{attribute} IN ({', '.join(quoted_values)})"
-    
-    elif operator == "!=":
-        if len(values) == 1:
-            return f"{attribute} != '{escaped_values[0]}'"
-        else:
-            quoted_values = [f"'{v}'" for v in escaped_values]
-            return f"{attribute} NOT IN ({', '.join(quoted_values)})"
-    
-    elif operator in [">", "<", ">=", "<="]:
-        if values:
-            return f"{attribute} {operator} '{escaped_values[0]}'"
-    
-    elif operator == "LIKE":
-        if values:
-            return f"{attribute} LIKE '%{escaped_values[0]}%'"
-    
-    elif operator == "IN":
-        if len(values) > 1:
-            quoted_values = [f"'{v}'" for v in escaped_values]
-            return f"{attribute} IN ({', '.join(quoted_values)})"
-        elif len(values) == 1:
-            return f"{attribute} = '{escaped_values[0]}'"
-    
-    elif operator == "BETWEEN":
-        if len(values) >= 2:
-            return f"{attribute} BETWEEN '{escaped_values[0]}' AND '{escaped_values[1]}'"
-    
-    return None
-
-
-def _apply_performance_optimizations(
-    filter_info: Dict[str, Any],
-    performance_mode: str,
-    available_attributes: List[str],
-    ctx: Optional[Context]
-) -> Dict[str, Any]:
-    """应用性能优化策略"""
-    optimizations = []
-    
-    if performance_mode == "speed":
-        # 速度优先：简化查询，添加索引提示
-        if filter_info.get("cql_filter"):
-            # 添加索引提示（如果支持）
-            optimizations.append("index_hint")
-            filter_info["performance_hints"].append("使用索引优化")
-    
-    elif performance_mode == "accuracy":
-        # 精度优先：保持完整查询
-        optimizations.append("full_precision")
-        filter_info["performance_hints"].append("保持查询精度")
-    
-    elif performance_mode == "minimal":
-        # 最小化：限制返回字段
-        optimizations.append("minimal_fields")
-        filter_info["performance_hints"].append("最小化返回字段")
-    
-    else:  # balanced
-        # 平衡模式：适度优化
-        optimizations.append("balanced_optimization")
-        filter_info["performance_hints"].append("平衡性能和精度")
-    
-    if optimizations:
-        filter_info["optimization_applied"] = True
-        filter_info["optimizations"] = optimizations
-    
-    return filter_info
-
-
-def _build_performance_config(
-    performance_mode: str,
-    use_spatial_index: bool,
-    enable_pagination: bool,
-    optimize_for_count: bool,
-    max_features: int,
-    filter_info: Dict[str, Any]
-) -> Dict[str, Any]:
-    """构建性能配置"""
-    config = {
-        "strategy": "standard",
-        "max_features": max_features,
-        "use_spatial_index": use_spatial_index,
-        "enable_pagination": enable_pagination,
-        "optimize_for_count": optimize_for_count,
-        "timeout": 60,
-        "chunk_size": 1000
-    }
-    
-    # 根据性能模式调整配置
-    if performance_mode == "speed":
-        config.update({
-            "strategy": "high_performance",
-            "timeout": 30,
-            "chunk_size": 500,
-            "max_features": min(max_features, 5000)
-        })
-    elif performance_mode == "accuracy":
-        config.update({
-            "strategy": "high_accuracy",
-            "timeout": 120,
-            "chunk_size": 2000
-        })
-    elif performance_mode == "minimal":
-        config.update({
-            "strategy": "minimal_load",
-            "timeout": 15,
-            "chunk_size": 200,
-            "max_features": min(max_features, 1000)
-        })
-    else:  # balanced
-        config.update({
-            "strategy": "balanced",
-            "timeout": 60,
-            "chunk_size": 1000
-        })
-    
-    # 根据过滤复杂度调整
-    if filter_info.get("complexity") == "expert":
-        config["timeout"] *= 1.5
-    elif filter_info.get("complexity") == "advanced":
-        config["timeout"] *= 1.2
-    
-    return config
-
-
-async def _fetch_wfs_data_advanced(
-    layer_info: Dict[str, Any],
-    query_config: Dict[str, Any],
-    filter_info: Dict[str, Any],
-    ctx: Optional[Context]
-) -> Dict[str, Any]:
-    """高性能WFS数据获取"""
-    try:
-        basic_info = layer_info.get("basic_info", {})
-        wfs_params = layer_info.get("access_parameters", {}).get("wfs", {})
-        
-        # 构建优化的WFS URL
-        wfs_url_base = wfs_params.get("service_url") or basic_info.get("service_url", "")
-        base_url = _optimize_wfs_url(wfs_url_base)
-        
-        if ctx:
-            await ctx.debug(f"🔧 使用优化WFS URL: {base_url}")
-        
-        # 构建请求参数
-        params = {
-            "SERVICE": "WFS",
-            "VERSION": wfs_params.get("version", "2.0.0"),
-            "REQUEST": "GetFeature",
-            "TYPENAME": wfs_params.get("typeNames", basic_info.get("layer_name", "")),
-            "OUTPUTFORMAT": "application/json",
-            "MAXFEATURES": str(query_config["max_features"]),
-            "SRSNAME": wfs_params.get("srsName", "EPSG:4326")
-        }
-        
-        # 添加过滤条件
-        if filter_info.get("cql_filter"):
-            params["CQL_FILTER"] = filter_info["cql_filter"]
-        
-        # 应用性能优化参数
-        if query_config.get("use_spatial_index"):
-            params["HINT_SPATIAL_INDEX"] = "true"
-        
-        if query_config["strategy"] == "minimal_load":
-            # 最小化字段返回
-            params["PROPERTYNAME"] = "geometry"
-        
-        # 构建请求URL
-        query_string = urlencode(params, quote_via=lambda x, *args, **kwargs: x)
-        wfs_url = f"{base_url}?{query_string}"
-        
-        if ctx:
-            await ctx.info(f"🌐 优化WFS请求: {query_config['strategy']}")
-            await ctx.debug(f"🔗 请求URL: {wfs_url}")
-        
-        # 优化HTTP配置
-        timeout = aiohttp.ClientTimeout(total=query_config["timeout"], connect=10)
-        headers = {
-            'User-Agent': 'OGC-MCP-Server-Advanced/1.0',
-            'Accept': 'application/json, application/geo+json',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive'
-        }
-        
-        # 执行请求
-        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-            start_time = asyncio.get_event_loop().time()
-            
-            async with session.get(wfs_url) as response:
-                end_time = asyncio.get_event_loop().time()
-                request_time = end_time - start_time
-                
-                if ctx:
-                    await ctx.debug(f"📥 HTTP响应: {response.status} (耗时: {request_time:.2f}s)")
-                
-                if response.status == 200:
-                    content_type = response.headers.get('content-type', '').lower()
-                    
-                    if 'json' in content_type:
-                        geojson_data = await response.json()
-                    else:
-                        text_content = await response.text()
-                        try:
-                            geojson_data = json.loads(text_content)
-                        except json.JSONDecodeError:
-                            raise Exception(f"无法解析响应为JSON。内容类型: {content_type}")
-                    
-                    # 验证响应
-                    if not isinstance(geojson_data, dict) or "features" not in geojson_data:
-                        if "ExceptionReport" in str(geojson_data):
-                            raise Exception(f"WFS服务错误: {str(geojson_data)[:500]}")
-                        raise Exception("响应格式无效")
-                    
-                    # 添加性能信息
-                    geojson_data["_performance"] = {
-                        "request_time": request_time,
-                        "strategy": query_config["strategy"],
-                        "feature_count": len(geojson_data.get("features", [])),
-                        "optimized": True
-                    }
-                    
-                    if ctx:
-                        feature_count = len(geojson_data.get("features", []))
-                        await ctx.info(f"✅ 获取 {feature_count} 个要素 (耗时: {request_time:.2f}s)")
-                    
-                    return geojson_data
-                    
-                else:
-                    error_text = await response.text()
-                    raise Exception(f"WFS请求失败: HTTP {response.status}\n{error_text[:500]}")
-                    
-    except Exception as e:
-        if ctx:
-            await ctx.error(f"❌ 高性能WFS查询失败: {str(e)}")
-        raise Exception(f"WFS数据获取失败: {str(e)}")
-
-
-def _optimize_wfs_url(wfs_url_base: str) -> str:
-    """优化WFS服务URL"""
-    if not wfs_url_base:
-        raise Exception("缺少WFS服务URL")
-    
-    # 清理和标准化URL
-    if "gwc/service/wmts" in wfs_url_base:
-        wfs_url_base = wfs_url_base.replace("gwc/service/wmts", "wfs")
-    elif "wmts" in wfs_url_base.lower():
-        wfs_url_base = wfs_url_base.replace("wmts", "wfs").replace("WMTS", "wfs")
-    elif not wfs_url_base.endswith(("/wfs", "/ows")):
-        if wfs_url_base.endswith("/"):
-            wfs_url_base = wfs_url_base + "wfs"
-        else:
-            wfs_url_base = wfs_url_base + "/wfs"
-    
-    return wfs_url_base.rstrip('?')
-
-
-def _analyze_query_results(
-    geojson_data: Dict[str, Any],
-    filter_info: Dict[str, Any],
-    query_config: Dict[str, Any],
-    ctx: Optional[Context]
-) -> Dict[str, Any]:
-    """分析查询结果性能"""
-    performance_info = geojson_data.get("_performance", {})
-    feature_count = len(geojson_data.get("features", []))
-    
-    analysis = {
-        "feature_count": feature_count,
-        "request_time": performance_info.get("request_time", 0),
-        "strategy_used": performance_info.get("strategy", "unknown"),
-        "optimized": performance_info.get("optimized", False),
-        "performance_rating": "unknown"
-    }
-    
-    # 性能评级
-    request_time = analysis["request_time"]
-    if request_time < 1.0:
-        analysis["performance_rating"] = "excellent"
-        analysis["performance_summary"] = f"优秀 ({request_time:.2f}s)"
-    elif request_time < 3.0:
-        analysis["performance_rating"] = "good"
-        analysis["performance_summary"] = f"良好 ({request_time:.2f}s)"
-    elif request_time < 10.0:
-        analysis["performance_rating"] = "fair"
-        analysis["performance_summary"] = f"一般 ({request_time:.2f}s)"
-    else:
-        analysis["performance_rating"] = "poor"
-        analysis["performance_summary"] = f"较慢 ({request_time:.2f}s)"
-    
-    # 效率分析
-    if feature_count > 0:
-        features_per_second = feature_count / max(request_time, 0.001)
-        analysis["efficiency"] = f"{features_per_second:.0f} 要素/秒"
-    
-    return analysis
-
-
-async def _generate_filter_suggestions(
-    layer_info: Dict[str, Any],
-    filter_info: Dict[str, Any],
-    ctx: Optional[Context]
-) -> Dict[str, Any]:
-    """生成智能过滤建议"""
-    suggestions = {
-        "attribute_suggestions": [],
-        "value_suggestions": [],
-        "query_suggestions": [],
-        "performance_tips": []
-    }
-    
-    try:
-        # 获取属性建议
-        available_attributes = _extract_attributes_from_resource(layer_info, ctx)
-        if available_attributes:
-            suggestions["attribute_suggestions"] = available_attributes[:10]
-        
-        # 获取值建议（从样本数据）
-        if filter_info.get("matched_attribute"):
-            value_samples = await _explore_attribute_values(
-                layer_info, filter_info["matched_attribute"], ctx, sample_size=20
-            )
-            suggestions["value_suggestions"] = value_samples[:10]
-        
-        # 查询建议
-        suggestions["query_suggestions"] = [
-            "尝试使用更宽泛的过滤条件",
-            "检查属性名称和值的拼写",
-            "使用LIKE操作符进行模糊匹配",
-            "尝试数值范围查询而非精确匹配"
-        ]
-        
-        # 性能建议
-        suggestions["performance_tips"] = [
-            "对于大数据集，使用performance_mode='speed'",
-            "启用空间索引优化 use_spatial_index=True",
-            "考虑使用分页查询 enable_pagination=True",
-            "使用多属性过滤缩小查询范围"
-        ]
-        
-    except Exception as e:
-        if ctx:
-            await ctx.debug(f"生成建议时出错: {str(e)}")
-    
-    return suggestions
-
-
-def _create_advanced_wfs_layer(
-    layer_info: Dict[str, Any],
-    title: str,
-    geojson_data: Dict[str, Any],
-    filter_info: Dict[str, Any],
-    query_config: Dict[str, Any],
-    result_analysis: Dict[str, Any]
-) -> Dict[str, Any]:
-    """创建增强的WFS图层对象"""
-    basic_info = layer_info.get("basic_info", {})
-    wfs_params = layer_info.get("access_parameters", {}).get("wfs", {})
-    capabilities = layer_info.get("capabilities", {})
-    
-    # 分析几何类型
+def _detect_geometry_type(geojson_data: Dict[str, Any]) -> str:
+    """检测GeoJSON数据的几何类型"""
     features = geojson_data.get("features", [])
-    geometry_types = set()
-    for feature in features:
-        geom = feature.get("geometry", {})
-        if geom and geom.get("type"):
-            geometry_types.add(geom["type"])
+    if not features:
+        return "unknown"
     
-    return {
-        # 基础信息
-        "name": basic_info.get("layer_name", ""),
-        "title": title,
-        "type": "wfs",  # 修改为标准的 wfs 类型，而不是 wfs_advanced
-        "service_type": "WFS",
-        "layer_info": basic_info,
-        
-        # 数据信息
-        "geojson_data": geojson_data,
-        "feature_count": len(features),
-        
-        # 几何和属性信息
-        "geometry_type": capabilities.get("geometry_type") or (list(geometry_types)[0] if geometry_types else None),
-        "geometry_types": list(geometry_types),
-        "attributes": capabilities.get("attributes", []),
-        
-        # 增强的过滤信息
-        "filter_info": {
-            **filter_info,
-            "has_advanced_filter": filter_info.get("mode") != "none",
-            "filter_complexity": filter_info.get("complexity", "simple"),
-            "optimization_level": len(filter_info.get("optimizations", []))
-        },
-        
-        # 性能信息
-        "performance_info": {
-            **result_analysis,
-            "query_config": query_config,
-            "supports_advanced_filtering": True,
-            "supports_multi_attribute": True,
-            "supports_performance_optimization": True
-        },
-        
-        # 空间信息
-        "bbox": capabilities.get("bbox", {}),
-        "crs_list": capabilities.get("crs_list", ["EPSG:4326"]),
-        "default_crs": capabilities.get("default_crs", "EPSG:4326"),
-        
-        # WFS参数
-        "wfs_params": wfs_params,
-        "queryable": True,
-        
-        # 样式
-        "style": _get_default_style(geometry_types),
-        
-        # 元数据
-        "metadata": {
-            "source": "advanced_wfs_tool_v2",
-            "version": "2.0",
-            "supports_multi_attribute_filter": True,
-            "supports_performance_optimization": True,
-            "supports_smart_suggestions": True,
-            "filter_capabilities": {
-                "operators": ["=", "!=", ">", "<", ">=", "<=", "LIKE", "IN", "BETWEEN"],
-                "logic_operators": ["AND", "OR"],
-                "performance_modes": ["balanced", "speed", "accuracy", "minimal"]
-            }
-        }
-    }
+    # 检查第一个要素的几何类型
+    first_feature = features[0]
+    geometry = first_feature.get("geometry", {})
+    return geometry.get("type", "unknown").lower()
 
 
-
-
-async def _get_layer_info_simplified(layer_name: str, ctx: Optional[Context]) -> Dict[str, Any]:
-    """从layer_registry资源获取图层详细信息（简化版本）
-    
-    Args:
-        layer_name: 图层名称
-        ctx: FastMCP上下文对象
-        
-    Returns:
-        图层详细信息字典
-        
-    Raises:
-        ValueError: 当图层不存在时
-        Exception: 资源访问错误时
-    """
-    try:
-        # 构建资源URI
-        layer_resource_uri = f"ogc://layer/{layer_name}"
-        
-        if ctx:
-            await ctx.debug(f"🔍 获取图层信息: {layer_resource_uri}")
-        
-        # 通过上下文读取资源
-        layer_info_raw = await ctx.read_resource(layer_resource_uri)
-        
-        # 处理不同的返回格式
-        if isinstance(layer_info_raw, str):
-            layer_info = json.loads(layer_info_raw)
-        elif isinstance(layer_info_raw, dict):
-            layer_info = layer_info_raw
-        elif isinstance(layer_info_raw, list):
-            if len(layer_info_raw) == 1:
-                item = layer_info_raw[0]
-                if hasattr(item, 'content'):
-                    layer_info = json.loads(item.content)
-                elif isinstance(item, dict):
-                    layer_info = item
-                else:
-                    layer_info = json.loads(str(item))
-            else:
-                raise Exception(f"资源返回了意外的列表格式: {layer_info_raw}")
-        else:
-            if hasattr(layer_info_raw, 'content'):
-                layer_info = json.loads(layer_info_raw.content)
-            else:
-                layer_info = json.loads(str(layer_info_raw))
-        
-        # 确保layer_info是字典类型
-        if not isinstance(layer_info, dict):
-            raise Exception(f"资源返回的数据格式不正确，期望字典，实际: {type(layer_info)}")
-        
-        # 检查是否有错误
-        if "error" in layer_info:
-            suggestions = layer_info.get("suggestions", [])
-            error_msg = layer_info["error"]
-            if suggestions:
-                error_msg += f"\n建议的图层名称: {', '.join(suggestions[:5])}"
-            raise ValueError(error_msg)
-        
-        return layer_info
-        
-    except json.JSONDecodeError as e:
-        raise Exception(f"解析图层信息失败: {str(e)}")
-    except Exception as e:
-        if "ValueError" in str(type(e)):
-            raise
-        raise Exception(f"获取图层信息失败: {str(e)}")
-
-
-def _validate_wfs_support(layer_info: Dict[str, Any], layer_name: str) -> bool:
-    """验证图层是否支持WFS服务
-    
-    Args:
-        layer_info: 图层信息字典
-        layer_name: 图层名称
-        
-    Returns:
-        是否支持WFS服务
-    """
-    # 检查基础信息中的服务类型
-    basic_info = layer_info.get("basic_info", {})
-    service_type = basic_info.get("service_type", "").upper()
-    
-    # 检查支持的服务列表
-    metadata = layer_info.get("metadata", {})
-    supported_services = metadata.get("supported_services", [])
-    
-    # 检查访问参数中是否有WFS配置
-    access_params = layer_info.get("access_parameters", {})
-    has_wfs_params = "wfs" in access_params
-    
-    # 任一条件满足即认为支持WFS
-    return (
-        service_type == "WFS" or
-        "WFS" in supported_services or
-        has_wfs_params
-    )
-
-
-def _extract_attributes_from_resource(layer_info: Dict[str, Any], ctx: Optional[Context]) -> List[str]:
-    """从资源信息中提取属性列表
-    
-    Args:
-        layer_info: 图层信息字典
-        ctx: MCP上下文
-        
-    Returns:
-        属性名称列表
-    """
-    attributes = []
-    
-    # 优先级1：详细能力信息中的WFS特征模式属性
-    detailed_capabilities = layer_info.get("detailed_capabilities", {})
-    wfs_details = detailed_capabilities.get("wfs", {})
-    feature_schema = wfs_details.get("feature_schema", {})
-    
-    if feature_schema.get("attributes"):
-        attributes.extend(feature_schema["attributes"])
-    
-    # 优先级2：详细能力信息中的WFS属性
-    if not attributes and wfs_details.get("attributes"):
-        attributes.extend(wfs_details["attributes"])
-    
-    # 优先级3：基础能力信息中的属性
-    if not attributes:
-        capabilities = layer_info.get("capabilities", {})
-        if capabilities.get("attributes"):
-            attributes.extend(capabilities["attributes"])
-    
-    # 去重并过滤空值，处理可能的字典格式属性
-    unique_attributes = []
-    seen = set()
-    for attr in attributes:
-        # 处理不同的属性格式
-        attr_name = None
-        if isinstance(attr, str):
-            attr_name = attr
-        elif isinstance(attr, dict):
-            # 如果是字典，尝试提取属性名
-            attr_name = attr.get("name") or attr.get("attribute") or attr.get("field")
-        
-        # 确保属性名是字符串且不为空
-        if attr_name and isinstance(attr_name, str) and attr_name.strip():
-            attr_name = attr_name.strip()
-            if attr_name not in seen:
-                unique_attributes.append(attr_name)
-                seen.add(attr_name)
-    
-    return unique_attributes
-
-
-def _smart_match_attribute(
-    target_attr: str, 
-    available_attributes: List[str], 
-    ctx: Optional[Context]
-) -> Optional[str]:
-    """智能属性匹配
-    
-    Args:
-        target_attr: 目标属性名
-        available_attributes: 可用属性列表
-        ctx: MCP上下文
-        
-    Returns:
-        匹配的属性名，如果没有匹配则返回None
-    """
-    if not target_attr or not available_attributes:
+def _calculate_bbox(geojson_data: Dict[str, Any]) -> Optional[List[float]]:
+    """计算GeoJSON数据的边界框"""
+    features = geojson_data.get("features", [])
+    if not features:
         return None
     
-    target_lower = target_attr.lower()
+    min_x = min_y = float('inf')
+    max_x = max_y = float('-inf')
     
-    # 1. 精确匹配
-    if target_attr in available_attributes:
-        return target_attr
-    
-    # 2. 大小写不敏感匹配
-    for attr in available_attributes:
-        if attr.lower() == target_lower:
-            return attr
-    
-    # 3. 包含匹配（目标属性包含在可用属性中）
-    for attr in available_attributes:
-        if target_lower in attr.lower():
-            return attr
-    
-    # 4. 被包含匹配（可用属性包含在目标属性中）
-    for attr in available_attributes:
-        if attr.lower() in target_lower:
-            return attr
-    
-    return None
-
-def _get_default_style(geometry_types: set) -> Dict[str, Any]:
-    """根据几何类型获取默认样式
-    
-    Args:
-        geometry_types: 几何类型集合
+    for feature in features:
+        geometry = feature.get("geometry", {})
+        coords = geometry.get("coordinates", [])
         
-    Returns:
-        默认样式字典
-    """
-    # 基础样式配置
-    base_style = {
-        "color": "#3388ff",
-        "weight": 3,
-        "opacity": 0.8,
-        "fillColor": "#3388ff",
-        "fillOpacity": 0.2
-    }
+        if geometry.get("type") == "Point":
+            x, y = coords
+            min_x, max_x = min(min_x, x), max(max_x, x)
+            min_y, max_y = min(min_y, y), max(max_y, y)
+        elif geometry.get("type") in ["LineString", "MultiPoint"]:
+            for coord in coords:
+                x, y = coord
+                min_x, max_x = min(min_x, x), max(max_x, x)
+                min_y, max_y = min(min_y, y), max(max_y, y)
+        elif geometry.get("type") in ["Polygon", "MultiLineString"]:
+            for ring in coords:
+                for coord in ring:
+                    x, y = coord
+                    min_x, max_x = min(min_x, x), max(max_x, x)
+                    min_y, max_y = min(min_y, y), max(max_y, y)
+        elif geometry.get("type") == "MultiPolygon":
+            for polygon in coords:
+                for ring in polygon:
+                    for coord in ring:
+                        x, y = coord
+                        min_x, max_x = min(min_x, x), max(max_x, x)
+                        min_y, max_y = min(min_y, y), max(max_y, y)
     
-    # 根据几何类型调整样式
-    if "Point" in geometry_types or "MultiPoint" in geometry_types:
-        # 点样式
-        base_style.update({
-            "radius": 6,
-            "fillOpacity": 0.6,
-            "weight": 2
-        })
-    elif "LineString" in geometry_types or "MultiLineString" in geometry_types:
-        # 线样式
-        base_style.update({
-            "weight": 4,
-            "fillOpacity": 0.0  # 线不需要填充
-        })
-    elif "Polygon" in geometry_types or "MultiPolygon" in geometry_types:
-        # 面样式
-        base_style.update({
-            "weight": 2,
-            "fillOpacity": 0.3
-        })
-    
-    return base_style    
+    if min_x != float('inf'):
+        return [min_x, min_y, max_x, max_y]
+    return None
