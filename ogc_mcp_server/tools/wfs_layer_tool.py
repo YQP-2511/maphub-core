@@ -395,6 +395,7 @@ async def get_layer_info_from_registry(layer_name: str, ctx: Optional[Context] =
 @wfs_layer_server.tool(
     name="add_wfs_layer",
     description="""添加WFS矢量图层，支持完整的过滤和排序功能。
+重点：在执行该工具前要先执行get_wfs_layer_attributes工具获取图层属性信息
 
 🔍 查询参数 (JSON格式):
 {
@@ -412,21 +413,41 @@ async def get_layer_info_from_registry(layer_name: str, ctx: Optional[Context] =
 - 不等于: !=
 - 大于/小于: >, <, >=, <=
 - 包含: IN (多值)
-- 模糊匹配: LIKE
-- 范围: BETWEEN
+- 模糊匹配: LIKE (如 "北%" 匹配所有"北"开头的值)
+- 范围: BETWEEN (需要提供两个值)
 
 🔄 排序选项:
 - 升序: {"attribute": "field_name", "order": "asc"}
 - 降序: {"attribute": "field_name", "order": "desc"}
 - 多字段: [{"attribute": "field1", "order": "asc"}, {"attribute": "field2", "order": "desc"}]
 
-💡 使用建议:
-- 单属性多值: {"filters": [{"attribute": "CITY_NAME", "values": ["北京","上海"]}]}
-- 数值比较: {"filters": [{"attribute": "P_MALE", "values": ["0.5"], "operator": ">"}]}
-- 排序限制: {"sort": {"attribute":"POPULATION","order":"desc"},"limit":3}
-- 复合查询: 组合过滤+排序+限制+逻辑运算符
+💡 多属性查询示例:
+- 城市+人口组合查询: 
+  {"filters": [
+    {"attribute": "CITY_NAME", "values": ["北京","上海"], "operator": "IN"},
+    {"attribute": "POPULATION", "values": ["1000000"], "operator": ">"}
+  ], "logic": "AND"}
 
-📊 常见数值字段示例:
+- 多条件组合查询:
+  {"filters": [
+    {"attribute": "LAND_KM", "values": ["100", "500"], "operator": "BETWEEN"},
+    {"attribute": "P_MALE", "values": ["0.5"], "operator": ">"},
+    {"attribute": "CITY_NAME", "values": ["北%"], "operator": "LIKE"}
+  ], "logic": "AND"}
+
+- 复杂逻辑查询(OR):
+  {"filters": [
+    {"attribute": "POPULATION", "values": ["5000000"], "operator": ">"},
+    {"attribute": "WATER_KM", "values": ["100"], "operator": ">"}
+  ], "logic": "OR", "limit": 10}
+
+📊 性能优化建议:
+- 使用精确的过滤条件减少返回数据量
+- 设置合理的limit值限制返回要素数量
+- 只查询必要的属性字段(系统会自动添加ID和几何字段)
+- 对大数据集使用BETWEEN代替多个>/<条件
+
+🌟 常见数值字段示例:
 - 人口数量: PERSONS (整数)
 - 男性比例: P_MALE (小数，如0.493表示49.3%)
 - 土地面积: LAND_KM (小数)
@@ -516,12 +537,54 @@ async def add_wfs_layer(
         # 应用限制
         effective_max_features = query_config.get("limit", max_features)
         
+        # 提取查询的属性
+        queried_attributes = _extract_queried_attributes(query_config)
+        if ctx and queried_attributes:
+            await ctx.debug(f"📋 查询的属性: {', '.join(queried_attributes)}")
+        
+        # 获取主标识字段
+        primary_identifier = _get_primary_identifier(layer_info)
+        if ctx:
+            await ctx.debug(f"🔑 主标识字段: {primary_identifier}")
+        
+        # 获取几何字段
+        geometry_field = _get_geometry_field_name(layer_info)
+        if ctx:
+            await ctx.debug(f"🌐 几何字段: {geometry_field}")
+        
+        # 构建属性限制列表
+        property_names = []
+        
+        # 只有在有查询条件时才限制属性
+        if queried_attributes:
+            # 添加查询的属性
+            for attr in queried_attributes:
+                if attr not in property_names:
+                    property_names.append(attr)
+            
+            # 添加主标识字段
+            if primary_identifier and primary_identifier not in property_names:
+                property_names.append(primary_identifier)
+            
+            # 添加几何字段
+            if geometry_field and geometry_field not in property_names:
+                property_names.append(geometry_field)
+            
+            if ctx and property_names:
+                await ctx.debug(f"📝 属性限制列表: {', '.join(property_names)}")
+        else:
+            # 没有查询条件时，不限制属性（返回全部属性）
+            if ctx:
+                await ctx.debug(f"📝 未指定查询条件，将返回全部属性")
+            property_names = None
+        
         # 构建完整URL
         wfs_url = url_builder.build_url(
             cql_filter=cql_filter,
             sort_by=sort_by,
             max_features=effective_max_features,
-            srs_name=wfs_params.get("srsName", "EPSG:4326")
+            srs_name=wfs_params.get("srsName", "EPSG:4326"),
+            property_names=property_names if property_names else None
         )
         
         if ctx:
@@ -581,6 +644,7 @@ async def add_wfs_layer(
             "id": f"wfs_{layer_name}_{len(visualization_tools._current_layers)}",
             "name": layer_name,
             "title": layer_title or layer_name,
+            "layer_name": layer_name,  # 添加layer_name字段以匹配模板显示需求
             "type": "geojson",  # 修改为geojson类型以匹配模板处理逻辑
             "service_type": "wfs",  # 添加服务类型标识
             "source": "wfs_service",
@@ -721,3 +785,189 @@ def _calculate_bbox(geojson_data: Dict[str, Any]) -> Optional[List[float]]:
     if min_x != float('inf'):
         return [min_x, min_y, max_x, max_y]
     return None
+
+def _extract_queried_attributes(query_config: Dict[str, Any]) -> List[str]:
+    """从查询配置中提取查询的属性名称
+    
+    Args:
+        query_config: 查询配置字典
+        
+    Returns:
+        查询属性名称列表
+    """
+    queried_attributes = []
+    
+    # 从过滤条件中提取属性
+    filters = query_config.get("filters", [])
+    for filter_item in filters:
+        attribute = filter_item.get("attribute")
+        if attribute and attribute not in queried_attributes:
+            queried_attributes.append(attribute)
+    
+    # 从排序配置中提取属性
+    sort_config = query_config.get("sort")
+    if sort_config:
+        if isinstance(sort_config, dict):
+            sort_attr = sort_config.get("attribute")
+            if sort_attr and sort_attr not in queried_attributes:
+                queried_attributes.append(sort_attr)
+        elif isinstance(sort_config, list):
+            for sort_item in sort_config:
+                if isinstance(sort_item, dict):
+                    sort_attr = sort_item.get("attribute")
+                    if sort_attr and sort_attr not in queried_attributes:
+                        queried_attributes.append(sort_attr)
+    
+    return queried_attributes
+
+
+def _get_primary_identifier(layer_info: Dict[str, Any]) -> Optional[str]:
+    """获取图层的主标识字段
+    
+    Args:
+        layer_info: 图层信息字典
+        
+    Returns:
+        主标识字段名称
+    """
+    # 常见的主标识字段名称
+    common_id_fields = ["OBJECTID", "FID", "ID", "GEOID", "STATE_FIPS", "FIPS", "STATE_ABBR"]
+    
+    # 首先检查详细能力中的属性
+    detailed_capabilities = layer_info.get("detailed_capabilities", {})
+    wfs_capabilities = detailed_capabilities.get("wfs", {})
+    
+    # 1. 首先从detailed_capabilities.wfs.attributes中查找
+    attributes = wfs_capabilities.get("attributes", [])
+    if attributes:
+        for attr in attributes:
+            attr_name = attr.get("name", "") if isinstance(attr, dict) else str(attr)
+            if attr_name.upper() in [field.upper() for field in common_id_fields]:
+                return attr_name
+    
+    # 2. 然后从capabilities.attributes中查找
+    capabilities = layer_info.get("capabilities", {})
+    cap_attributes = capabilities.get("attributes", [])
+    if cap_attributes:
+        for attr in cap_attributes:
+            attr_name = attr.get("name", "") if isinstance(attr, dict) else str(attr)
+            if attr_name.upper() in [field.upper() for field in common_id_fields]:
+                return attr_name
+    
+    # 3. 最后从fields中查找（向后兼容）
+    fields = layer_info.get("fields", [])
+    if fields:
+        for field in fields:
+            field_name = field.get("name", "") if isinstance(field, dict) else str(field)
+            if field_name.upper() in [field.upper() for field in common_id_fields]:
+                return field_name
+    
+    # 4. 如果没有找到常见ID字段，尝试查找包含"ID"的字段
+    # 再次检查所有属性源
+    for attr_list in [attributes, cap_attributes, fields]:
+        if attr_list:
+            for attr in attr_list:
+                attr_name = attr.get("name", "") if isinstance(attr, dict) else str(attr)
+                if "ID" in attr_name.upper():
+                    return attr_name
+    
+    # 5. 新增：查找包含"NAME"的字段作为主标识
+    for attr_list in [attributes, cap_attributes, fields]:
+        if attr_list:
+            for attr in attr_list:
+                attr_name = attr.get("name", "") if isinstance(attr, dict) else str(attr)
+                if "NAME" in attr_name.upper():
+                    return attr_name
+    
+    # 6. 如果仍然没有找到，返回第一个非几何字段
+    geometry_field = _get_geometry_field_name(layer_info)
+    for attr_list in [attributes, cap_attributes, fields]:
+        if attr_list:
+            for attr in attr_list:
+                attr_name = attr.get("name", "") if isinstance(attr, dict) else str(attr)
+                if attr_name != geometry_field:
+                    return attr_name
+    
+    # 7. 如果所有尝试都失败，返回默认值
+    return "OBJECTID"
+
+
+def _get_geometry_field_name(layer_info: Dict[str, Any]) -> str:
+    """获取图层的几何字段名称
+    
+    Args:
+        layer_info: 图层信息字典
+        
+    Returns:
+        几何字段名称
+    """
+    # 常见的几何字段名称
+    common_geom_fields = ["SHAPE", "GEOMETRY", "THE_GEOM", "GEOM", "SHAPE_GEOMETRY"]
+    
+    # 首先检查详细能力中的属性
+    detailed_capabilities = layer_info.get("detailed_capabilities", {})
+    wfs_capabilities = detailed_capabilities.get("wfs", {})
+    
+    # 1. 首先从detailed_capabilities.wfs.attributes中查找
+    attributes = wfs_capabilities.get("attributes", [])
+    if attributes:
+        # 查找类型包含"geometry"或"geom"的字段
+        for attr in attributes:
+            if isinstance(attr, dict):
+                attr_type = attr.get("type", "").lower()
+                attr_name = attr.get("name", "")
+                if "geometry" in attr_type or "geom" in attr_type:
+                    return attr_name
+                
+        # 查找名称匹配常见几何字段的字段
+        for attr in attributes:
+            attr_name = attr.get("name", "") if isinstance(attr, dict) else str(attr)
+            if attr_name.upper() in [field.upper() for field in common_geom_fields]:
+                return attr_name
+    
+    # 2. 然后从capabilities.attributes中查找
+    capabilities = layer_info.get("capabilities", {})
+    cap_attributes = capabilities.get("attributes", [])
+    if cap_attributes:
+        # 查找类型包含"geometry"或"geom"的字段
+        for attr in cap_attributes:
+            if isinstance(attr, dict):
+                attr_type = attr.get("type", "").lower()
+                attr_name = attr.get("name", "")
+                if "geometry" in attr_type or "geom" in attr_type:
+                    return attr_name
+                
+        # 查找名称匹配常见几何字段的字段
+        for attr in cap_attributes:
+            attr_name = attr.get("name", "") if isinstance(attr, dict) else str(attr)
+            if attr_name.upper() in [field.upper() for field in common_geom_fields]:
+                return attr_name
+    
+    # 3. 最后从fields中查找（向后兼容）
+    fields = layer_info.get("fields", [])
+    if fields:
+        # 查找类型包含"geometry"或"geom"的字段
+        for field in fields:
+            if isinstance(field, dict):
+                field_type = field.get("type", "").lower()
+                field_name = field.get("name", "")
+                if "geometry" in field_type or "geom" in field_type:
+                    return field_name
+                
+        # 查找名称匹配常见几何字段的字段
+        for field in fields:
+            field_name = field.get("name", "") if isinstance(field, dict) else str(field)
+            if field_name.upper() in [field.upper() for field in common_geom_fields]:
+                return field_name
+    
+    # 4. 如果没有找到，查找名称中包含"geom"的字段
+    for attr_list in [attributes, cap_attributes, fields]:
+        if attr_list:
+            for attr in attr_list:
+                attr_name = attr.get("name", "") if isinstance(attr, dict) else str(attr)
+                if "GEOM" in attr_name.upper():
+                    return attr_name
+    
+    # 5. 如果所有尝试都失败，返回默认值
+    return "the_geom"
+
