@@ -394,19 +394,31 @@ async def get_layer_info_from_registry(layer_name: str, ctx: Optional[Context] =
 
 @wfs_layer_server.tool(
     name="add_wfs_layer",
-    description="""添加WFS矢量图层，支持完整的过滤和排序功能。
+    description="""添加WFS矢量图层，支持完整的过滤、排序和属性显示功能。
 重点：在执行该工具前要先执行get_wfs_layer_attributes工具获取图层属性信息
 
 🔍 查询参数 (JSON格式):
 {
   "filters": [
-    {"attribute": "CITY_NAME", "values": ["北京","上海"], "operator": "IN"},
-    {"attribute": "POPULATION", "values": ["1000000"], "operator": ">"}
+    {"attribute": "名称字段", "values": ["查询值"], "operator": "="}
   ],
-  "sort": {"attribute": "POPULATION", "order": "desc"},
+  "sort": {"attribute": "排序字段", "order": "desc"},
+  "display_attributes": ["显示字段1", "显示字段2", "显示字段3"],
   "limit": 100,
   "logic": "AND"
 }
+
+📋 参数说明:
+- filters: 过滤条件列表，用于筛选数据
+- sort: 排序条件，决定数据的显示顺序
+- display_attributes: 要显示的属性列表，即使不用于过滤或排序也会返回这些属性
+- limit: 返回的最大要素数量
+- logic: 多个过滤条件之间的逻辑关系(AND/OR)
+
+📊 属性显示说明:
+- 如果不指定display_attributes，系统只会返回用于过滤和排序的属性
+- 要查看特定属性(如人口、面积、温度等)，请将其添加到display_attributes列表中
+- 例如: 要查看某地区的温度情况，应同时指定地区名称过滤和温度字段显示属性
 
 📋 支持的操作符:
 - 等于: = 
@@ -422,24 +434,28 @@ async def get_layer_info_from_registry(layer_name: str, ctx: Optional[Context] =
 - 多字段: [{"attribute": "field1", "order": "asc"}, {"attribute": "field2", "order": "desc"}]
 
 💡 多属性查询示例:
-- 城市+人口组合查询: 
+- 查看特定区域的多个属性: 
   {"filters": [
-    {"attribute": "CITY_NAME", "values": ["北京","上海"], "operator": "IN"},
-    {"attribute": "POPULATION", "values": ["1000000"], "operator": ">"}
-  ], "logic": "AND"}
+    {"attribute": "区域名称", "values": ["区域1","区域2"], "operator": "IN"}
+  ], 
+  "display_attributes": ["属性1", "属性2", "属性3"],
+  "logic": "AND"}
 
-- 多条件组合查询:
+- 按数值大小筛选并排序:
   {"filters": [
-    {"attribute": "LAND_KM", "values": ["100", "500"], "operator": "BETWEEN"},
-    {"attribute": "P_MALE", "values": ["0.5"], "operator": ">"},
-    {"attribute": "CITY_NAME", "values": ["北%"], "operator": "LIKE"}
-  ], "logic": "AND"}
+    {"attribute": "数值字段", "values": ["阈值"], "operator": ">"}
+  ], 
+  "sort": {"attribute": "数值字段", "order": "desc"},
+  "display_attributes": ["名称字段", "数值字段", "其他属性"],
+  "logic": "AND"}
 
-- 复杂逻辑查询(OR):
+- 复杂条件查询:
   {"filters": [
-    {"attribute": "POPULATION", "values": ["5000000"], "operator": ">"},
-    {"attribute": "WATER_KM", "values": ["100"], "operator": ">"}
-  ], "logic": "OR", "limit": 10}
+    {"attribute": "属性A", "values": ["属性B"], "operator": ">"},
+    {"attribute": "属性C", "values": ["阈值"], "operator": "<"}
+  ], 
+  "display_attributes": ["名称字段", "属性A", "属性B", "属性C"],
+  "logic": "AND"}
 
 📊 性能优化建议:
 - 使用精确的过滤条件减少返回数据量
@@ -447,11 +463,12 @@ async def get_layer_info_from_registry(layer_name: str, ctx: Optional[Context] =
 - 只查询必要的属性字段(系统会自动添加ID和几何字段)
 - 对大数据集使用BETWEEN代替多个>/<条件
 
-🌟 常见数值字段示例:
-- 人口数量: PERSONS (整数)
-- 男性比例: P_MALE (小数，如0.493表示49.3%)
-- 土地面积: LAND_KM (小数)
-- 水域面积: WATER_KM (小数)
+🌟 常见属性字段类型:
+- 名称/标识: NAME, ID, CODE (文本或数字)
+- 数值型: VALUE, COUNT, AMOUNT (整数或小数)
+- 比例型: RATE, PERCENTAGE, RATIO (小数，如0.75表示75%)
+- 面积/长度: AREA, LENGTH, DISTANCE (数值，通常带单位)
+- 时间型: DATE, TIME, TIMESTAMP (日期时间格式)
 """,
     tags={"wfs", "layer", "vector", "filter", "sort", "query", "numeric"}
 )
@@ -460,6 +477,7 @@ async def add_wfs_layer(
     query: Optional[str] = None,
     max_features: int = 1000,
     layer_title: Optional[str] = None,
+    display_attributes: Optional[List[str]] = None,  # 新增参数
     ctx: Optional[Context] = None
 ) -> Dict[str, Any]:
     """添加WFS图层到地图
@@ -516,7 +534,9 @@ async def add_wfs_layer(
                 query_config = json.loads(query)
             except json.JSONDecodeError as e:
                 raise ValueError(f"查询参数JSON格式错误: {str(e)}")
-        
+        # 处理 display_attributes 参数
+        if display_attributes:
+            query_config["display_attributes"] = display_attributes
         # 构建URL
         url_builder = WFSURLBuilder(service_url, layer_name)
         
@@ -645,7 +665,7 @@ async def add_wfs_layer(
             "name": layer_name,
             "title": layer_title or layer_name,
             "layer_name": layer_name,  # 添加layer_name字段以匹配模板显示需求
-            "type": "geojson",  # 修改为geojson类型以匹配模板处理逻辑
+            "type": "wfs",  # 将"geojson"改为"wfs"
             "service_type": "wfs",  # 添加服务类型标识
             "source": "wfs_service",
             "geojson_data": geojson_data,  # 修改字段名以匹配模板期望
@@ -677,6 +697,7 @@ async def add_wfs_layer(
             },
             # 添加图层信息以匹配模板期望
             "layer_info": {
+                "layer_name": layer_name,  # 确保layer_info中也有layer_name
                 "service_name": service_url.split('/')[2] if '//' in service_url else "WFS服务",
                 "layer_title": layer_title or layer_name,
                 "crs": "EPSG:4326"
@@ -817,8 +838,14 @@ def _extract_queried_attributes(query_config: Dict[str, Any]) -> List[str]:
                     sort_attr = sort_item.get("attribute")
                     if sort_attr and sort_attr not in queried_attributes:
                         queried_attributes.append(sort_attr)
+    # 新增：从显示属性列表中提取属性
+    display_attributes = query_config.get("display_attributes", [])
+    if display_attributes:
+        for attr in display_attributes:
+            if attr and attr not in queried_attributes:
+                queried_attributes.append(attr)
     
-    return queried_attributes
+    return queried_attributes                    
 
 
 def _get_primary_identifier(layer_info: Dict[str, Any]) -> Optional[str]:
