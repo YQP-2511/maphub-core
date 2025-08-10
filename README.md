@@ -113,26 +113,26 @@ python run_ogc_mcp_server.py
 
 ### 1. 图层管理工具 (mgmt_*)
 - `mgmt_register_ogc_services`: 注册 OGC 服务
-- `search_and_list_geographic_data`: 搜索和列出所有地理数据图层
-- `get_wfs_layer_attributes`: 获取 WFS 图层属性
+- `mgmt_search_and_list_geographic_data`: 搜索和列出所有地理数据图层
+- `mgmt_get_wfs_layer_attributes`: 获取 WFS 图层属性
 
 ### 2. WMS 图层工具 (wms_*)
-- `add_wms_layer`: 添加 WMS 图层到可视化列表
+- `wms_add_wms_layer`: 添加 WMS 图层到可视化列表
 - 支持栅格数据和底图可视化
 - 自动获取图层边界框和坐标系信息
 
 ### 3. WFS 图层工具 (wfs_*)
-- `add_wfs_layer`: 添加 WFS 图层到可视化列表
+- `wfs_add_wfs_layer`: 添加 WFS 图层到可视化列表
 - 支持矢量数据和要素查询
 - 提供属性信息和几何数据
 
 ### 4. WMTS 图层工具 (wmts_*)
-- `add_wmts_layer`: 添加 WMTS 瓦片图层
+- `wmts_add_wmts_layer`: 添加 WMTS 瓦片图层
 - 支持高性能瓦片地图服务
 - 优化的缓存和加载策略
 
 ### 5. 可视化工具 (viz_*)
-- `create_composite_visualization`: 创建复合可视化地图
+- `viz_create_composite_visualization`: 创建复合可视化地图
 
 ### 6. 图层注册表资源 (ogc://)
 - `ogc://layers`: 获取所有注册的图层列表
