@@ -16,6 +16,9 @@ MapHub Core 是一个基于 FastMCP 框架构建的 OGC 服务图层管理和可
 - **🔄 异步处理**: 全异步架构，支持高并发访问
 
 ## 📁 项目架构
+## 
+
+```
 maphub/
 ├── 📁 ogc_mcp_server/           # 主要服务器代码
 │   ├── 📁 database/             # 数据库层
@@ -42,7 +45,9 @@ maphub/
 ├── 📄 run_ogc_mcp_server.py    # 服务器启动脚本
 ├── 📄 requirements.txt         # 项目依赖
 └── 📄 *.md                     # 文档文件
+```
 
+## 
 ## 🛠️ 技术栈
 
 ### 核心框架
